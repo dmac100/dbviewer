@@ -225,6 +225,9 @@ final class QueryTab {
                     runCurrent();
                 }
                 e.doit = false;
+            } else if ((e.stateMask & runModifier) != 0 && e.keyCode == 'a') {
+                text.selectAll();
+                e.doit = false;
             }
         });
         return text;

@@ -16,7 +16,8 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   a folder body near an edge splits the main panel horizontally or vertically. Tabs can also
   be dragged between panes; the editor text, cursor position and results follow the tab.
   **Ctrl+Enter** runs the statement under the cursor; **Ctrl+Shift+Enter** (or F5 / *Run Query*)
-  runs every statement in the editor.
+  runs every statement in the editor; **Ctrl+A** selects the whole query. The SQL colours adapt to
+  the system's dark theme with bright keywords, strings and numbers.
 - **Bottom pane** — a virtualized results table in each tab, with column headers that sort the
   rows ascending/descending using natural ordering (`item2` before `item10`), and a context menu
   to copy a field, copy rows (tab-separated), or delete rows from the database after a confirmation.
