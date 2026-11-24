@@ -503,8 +503,13 @@ public final class DbViewer {
 
     /** Shows a Yes/No confirmation dialog for destructive actions. */
     boolean confirm(String question, String detail) {
+        return confirm("Confirm Delete", question, detail);
+    }
+
+    /** Shows a Yes/No confirmation dialog with a caller-supplied title. */
+    boolean confirm(String title, String question, String detail) {
         MessageBox box = new MessageBox(shell, SWT.ICON_QUESTION | SWT.YES | SWT.NO);
-        box.setText("Confirm Delete");
+        box.setText(title);
         box.setMessage(question + "\n\n" + detail);
         return box.open() == SWT.YES;
     }

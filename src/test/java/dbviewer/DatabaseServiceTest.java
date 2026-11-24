@@ -3,6 +3,7 @@ package dbviewer;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,7 +12,9 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -85,6 +88,80 @@ class DatabaseServiceTest {
         SQLException error = assertThrows(SQLException.class,
                 () -> service.deleteRows(withoutKey.sourceTable(), List.<Object[]>of(withoutKey.rawRows().get(0))));
         assertTrue(error.getMessage().contains("primary key"));
+        service.disconnect();
+    }
+
+    @Test
+    void appliesUpdatesAndInsertsToTheDatabase() throws Exception {
+        Path db = tempDir.resolve("edit.db");
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+                Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER)");
+            s.execute("INSERT INTO items VALUES (1, 'a', 1), (2, 'b', 2)");
+        }
+
+        DatabaseService service = new DatabaseService();
+        service.connect(profile(db));
+        QueryResult result = service.execute("SELECT id, name, qty FROM items ORDER BY id");
+        QueryResult.SourceTable source = result.sourceTable();
+
+        LinkedHashMap<String, Object> changed = new LinkedHashMap<>();
+        changed.put("name", "Grace");
+        changed.put("qty", 9);
+        DatabaseService.RowUpdate update = new DatabaseService.RowUpdate(
+                List.of("id"), List.of(result.rawRows().get(0)[0]), changed);
+        LinkedHashMap<String, Object> added = new LinkedHashMap<>();
+        added.put("name", "Ada");
+        added.put("qty", 3);
+        DatabaseService.RowInsert insert = new DatabaseService.RowInsert(added);
+
+        assertEquals(2, service.applyChanges(source, List.of(update), List.of(insert)));
+        QueryResult after = service.execute("SELECT id, name, qty FROM items ORDER BY id");
+        assertEquals(List.of("Grace", "b", "Ada"), after.rows().stream().map(r -> r[1]).toList());
+        assertEquals("9", after.rows().get(0)[2]);
+        assertEquals("3", after.rows().get(2)[2]);
+        service.disconnect();
+    }
+
+    @Test
+    void rollsBackWhenOneChangeFails() throws Exception {
+        Path db = tempDir.resolve("rollback.db");
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+                Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)");
+            s.execute("INSERT INTO items VALUES (1, 'a')");
+        }
+
+        DatabaseService service = new DatabaseService();
+        service.connect(profile(db));
+        QueryResult result = service.execute("SELECT id, name FROM items");
+
+        DatabaseService.RowUpdate good = new DatabaseService.RowUpdate(
+                List.of("id"), List.of(1), Map.of("name", "changed"));
+        LinkedHashMap<String, Object> bad = new LinkedHashMap<>();
+        bad.put("no_such_column", "x");
+        assertThrows(SQLException.class, () -> service.applyChanges(result.sourceTable(),
+                List.of(good), List.of(new DatabaseService.RowInsert(bad))));
+        assertEquals("a", service.execute("SELECT name FROM items").rows().get(0)[0]);
+        service.disconnect();
+    }
+
+    @Test
+    void onlyMapsResultsFromOneTable() throws Exception {
+        Path db = tempDir.resolve("join.db");
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+                Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT)");
+            s.execute("CREATE TABLE notes (id INTEGER PRIMARY KEY, person_id INTEGER, note TEXT)");
+            s.execute("INSERT INTO people VALUES (1, 'Ada')");
+            s.execute("INSERT INTO notes VALUES (1, 1, 'hello')");
+        }
+
+        DatabaseService service = new DatabaseService();
+        service.connect(profile(db));
+        QueryResult joined = service.execute(
+                "SELECT people.id, notes.note FROM people JOIN notes ON notes.person_id = people.id");
+        assertNull(joined.sourceTable());
         service.disconnect();
     }
 

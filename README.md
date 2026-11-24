@@ -21,6 +21,12 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   rows ascending/descending using natural ordering (`item2` before `item10`), and a context menu
   to copy a field, copy rows (tab-separated), or delete rows from the database after a confirmation.
   Shows row count and execution time; update statements show the affected-row count.
+- **Editable results** — when a query returns a single table and includes its primary key column(s),
+  click any cell to edit it (Enter/F2 also works). Type in the blank **`(new row)`** line under the
+  results to add rows. Changed cells are highlighted; **Cancel Changes** discards them and
+  **Save Changes** shows a summary of the updates and inserts before writing them to the database
+  in one transaction. Results from joins, views without keys and queries that omit the primary key
+  stay read-only.
 - JDBC drivers bundled for **SQLite**, **MySQL**, and **PostgreSQL**. Any other JDBC driver
   can be used by choosing *Generic JDBC* and adding its jar to the classpath/dependencies.
 - Optional **SSH tunnel**: enable it in the connection dialog to reach a remote database through
@@ -67,7 +73,9 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
 4. Type or edit SQL in the active tab: **Ctrl+Enter** runs the statement at the cursor,
    **Ctrl+Shift+Enter** runs the whole script. Results appear below the editor in that tab.
    Use **Ctrl+T** for another query tab, drag tabs by their tab strips to reorder or split
-   the main panel, and right-click the results for copy/delete actions.
+   the main panel, and right-click the results for copy/delete actions. When the result is editable,
+   click a cell to change it or the `(new row)` line to add one, then use **Cancel Changes** or
+   **Save Changes** in the results toolbar.
 
 ## Notes
 
@@ -77,6 +85,10 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
 - **Delete Row(s)** asks for confirmation, then issues a `DELETE` for the selected rows. Tables
   with a primary key are matched by that key; otherwise all columns in the result are used. If a
   query omits the primary key column, deletion is refused.
+- Editable cells use the values exactly as typed. Type `<NULL>` for SQL NULL; in a new row, leave a
+  cell empty to let the database supply its default (for example an auto-incrementing key) and use
+  `''` to insert an empty string. After saving, a single-select query is re-run so generated keys
+  appear. Numeric, boolean, date and time values are converted using the column's JDBC type.
 - Status bar messages are shortened to fit the window; hover over them for the full text.
 - Queries run on the UI thread with a wait cursor. Long-running statements will block
   the window until they finish.
