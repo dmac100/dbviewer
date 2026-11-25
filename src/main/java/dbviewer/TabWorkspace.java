@@ -5,6 +5,8 @@ import java.util.List;
 
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.CTabFolder2Adapter;
+import org.eclipse.swt.custom.CTabFolderEvent;
 import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.layout.GridData;
@@ -21,12 +23,14 @@ final class TabWorkspace implements TabDrag.Host {
     private final DbViewer owner;
     private final SashForm sash;
     private final TabDrag drag;
-    private final CTabFolder primary;
+    private CTabFolder primary;
     private CTabFolder secondary;
     private final List<QueryTab> tabs = new ArrayList<>();
 
     /** The folder that has focus, or the one used last. */
     private CTabFolder current;
+    /** True while a drag is creating a second folder, before the tab has landed in it. */
+    private boolean splitting;
     private int nextId = 1;
     private int nextTabNumber = 1;
 
@@ -44,6 +48,18 @@ final class TabWorkspace implements TabDrag.Host {
         folder.setTabHeight(folder.getTabHeight() + 3);
         folder.setUnselectedCloseVisible(true);
 
+        // The tab X button reports through CTabFolder2Listener, not an SWT.Close event. Handle it
+        // here so the tab is removed through closeTab() and an emptied split pane collapses.
+        folder.addCTabFolder2Listener(new CTabFolder2Adapter() {
+            @Override
+            public void close(CTabFolderEvent e) {
+                e.doit = false;
+                if (e.item instanceof CTabItem item && item.getData("tab") instanceof QueryTab tab) {
+                    closeTab(tab);
+                }
+            }
+        });
+
         Button newTabButton = new Button(folder, SWT.PUSH);
         newTabButton.setText("+");
         newTabButton.setToolTipText("New query tab (Ctrl+T)");
@@ -53,16 +69,23 @@ final class TabWorkspace implements TabDrag.Host {
         });
         folder.setTopRight(newTabButton);
 
-        folder.addListener(SWT.Close, e -> {
-            e.doit = false; // closeTab disposes the item itself
-            if (e.item instanceof CTabItem item && item.getData("tab") instanceof QueryTab tab) {
-                closeTab(tab);
-            }
-        });
         folder.addListener(SWT.Selection, e -> {
             if (!folder.isDisposed()) {
                 current = folder;
             }
+        });
+        // A tab can be removed without going through closeTab (for example, when a drag removes
+        // the last tab from a folder). Sweep empty panes after the current event so a split never
+        // survives as a blank container.
+        folder.addListener(SWT.Resize, e -> {
+            if (splitting || folder.isDisposed() || folder.getItemCount() != 0) {
+                return;
+            }
+            folder.getDisplay().asyncExec(() -> {
+                if (!splitting && !folder.isDisposed() && folder.getItemCount() == 0) {
+                    collapseIfEmpty(folder);
+                }
+            });
         });
         drag.attach(folder);
         return folder;
@@ -94,10 +117,15 @@ final class TabWorkspace implements TabDrag.Host {
         if (zone == TabDrag.INSERT) {
             tab.moveTo(target, index);
         } else {
-            ensureSecondary();
-            sash.setOrientation(zone == TabDrag.LEFT || zone == TabDrag.RIGHT
-                    ? SWT.HORIZONTAL : SWT.VERTICAL);
-            tab.moveTo(secondary, secondary.getItemCount());
+            splitting = true;
+            try {
+                ensureSecondary();
+                sash.setOrientation(zone == TabDrag.LEFT || zone == TabDrag.RIGHT
+                        ? SWT.HORIZONTAL : SWT.VERTICAL);
+                tab.moveTo(secondary, secondary.getItemCount());
+            } finally {
+                splitting = false;
+            }
         }
         current = tab.item().getParent();
         collapseIfEmpty(from);
@@ -118,17 +146,35 @@ final class TabWorkspace implements TabDrag.Host {
         if (folder == secondary && folder.getItemCount() == 0) {
             secondary.dispose();
             secondary = null;
-            if (current == folder) {
+            if (current == folder || current == null || current.isDisposed()) {
                 current = primary;
             }
-            sash.setOrientation(SWT.HORIZONTAL);
+            resetSinglePane();
+            return;
         }
-        if (current == primary && primary.getItemCount() == 0
-                && secondary != null && secondary.getItemCount() > 0) {
-            current = secondary;
-            if (secondary.getSelection() == null) {
-                secondary.setSelection(0);
+        if (folder == primary && folder.getItemCount() == 0
+                && secondary != null && !secondary.isDisposed() && secondary.getItemCount() > 0) {
+            // The remaining side becomes the single folder instead of leaving an empty pane.
+            CTabFolder empty = primary;
+            primary = secondary;
+            secondary = null;
+            if (current == null || current == empty || current.isDisposed()) {
+                current = primary;
             }
+            empty.dispose();
+            resetSinglePane();
+            if (primary.getSelection() == null) {
+                primary.setSelection(0);
+            }
+        }
+    }
+
+    /** Restores a single full-width pane after a split collapses. */
+    private void resetSinglePane() {
+        sash.setOrientation(SWT.HORIZONTAL);
+        if (!sash.isDisposed()) {
+            sash.setWeights(new int[] {100});
+            sash.layout(true, true);
         }
     }
 
