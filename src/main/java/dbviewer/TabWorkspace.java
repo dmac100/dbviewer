@@ -10,7 +10,6 @@ import org.eclipse.swt.custom.CTabFolderEvent;
 import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.layout.GridData;
-import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 
@@ -47,6 +46,12 @@ final class TabWorkspace implements TabDrag.Host {
         CTabFolder folder = new CTabFolder(sash, SWT.TOP | SWT.BORDER);
         folder.setTabHeight(folder.getTabHeight() + 3);
         folder.setUnselectedCloseVisible(true);
+        // Keep only the tabs themselves on the strip: no plus, MRU, minimize or maximize controls.
+        // New tabs are still available from the toolbar and Ctrl+T.
+        folder.setTopRight(null);
+        folder.setMinimizeVisible(false);
+        folder.setMaximizeVisible(false);
+        folder.setMRUVisible(false);
 
         // The tab X button reports through CTabFolder2Listener, not an SWT.Close event. Handle it
         // here so the tab is removed through closeTab() and an emptied split pane collapses.
@@ -59,15 +64,6 @@ final class TabWorkspace implements TabDrag.Host {
                 }
             }
         });
-
-        Button newTabButton = new Button(folder, SWT.PUSH);
-        newTabButton.setText("+");
-        newTabButton.setToolTipText("New query tab (Ctrl+T)");
-        newTabButton.addListener(SWT.Selection, e -> {
-            current = folder;
-            newTab();
-        });
-        folder.setTopRight(newTabButton);
 
         folder.addListener(SWT.Selection, e -> {
             if (!folder.isDisposed()) {
