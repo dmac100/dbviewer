@@ -51,7 +51,10 @@ final class QueryTab {
     private MenuItem copyFieldItem;
     private MenuItem copyRowItem;
     private MenuItem copyAllItem;
+    private MenuItem openForeignKeyItem;
     private MenuItem deleteRowItem;
+
+    private ForeignKeyLookup foreignKeyLookup = new ForeignKeyLookup(List.of(), false, false);
 
     private Button cancelChangesButton;
     private Button saveChangesButton;
@@ -272,6 +275,9 @@ final class QueryTab {
         table.addListener(SWT.SetData, e -> fillResultItem((TableItem) e.item));
         table.addListener(SWT.MouseDown, e -> {
             if (e.button == 3) {
+                TableItem item = table.getItem(new Point(e.x, e.y));
+                selectedRow = item == null ? -1 : table.indexOf(item);
+                selectedColumn = columnAt(e.x);
                 commitCellEdit();
                 return;
             }
@@ -701,6 +707,8 @@ final class QueryTab {
         copyRowItem = contextAction(menu, "Copy Row", () -> copyRows(false));
         copyAllItem = contextAction(menu, "Copy All Rows", () -> copyRows(true));
         new MenuItem(menu, SWT.SEPARATOR);
+        openForeignKeyItem = contextAction(menu, "Open Referenced Rows...", this::openForeignKey);
+        new MenuItem(menu, SWT.SEPARATOR);
         deleteRowItem = contextAction(menu, "Delete Row(s)", this::deleteRows);
         menu.addListener(SWT.Show, e -> updateContextMenu());
     }
@@ -729,6 +737,29 @@ final class QueryTab {
         copyRowItem.setEnabled(anyRow);
         copyAllItem.setEnabled(dataRowCount() > 0);
         deleteRowItem.setEnabled(existingRow && !pendingEdits);
+
+        QueryResult.SourceTable source = currentResult == null ? null : currentResult.sourceTable();
+        String column = source != null && selectedColumn >= 0
+                && selectedColumn < source.columnNames().size()
+                        ? source.columnNames().get(selectedColumn) : "";
+        foreignKeyLookup = owner.foreignKeyLookup(source, column);
+        openForeignKeyItem.setEnabled(source != null && !column.isBlank()
+                && selectedRow >= 0 && selectedRow < rows.size() && selectedRow < rawRows.size()
+                && selectedColumn >= 0 && selectedColumn < rawRows.get(selectedRow).length
+                && rawRows.get(selectedRow)[selectedColumn] != null
+                && !foreignKeyLookup.options().isEmpty());
+    }
+
+    /** Follows the selected foreign-key value into the referenced table in a new tab. */
+    private void openForeignKey() {
+        closeCellEditor();
+        QueryResult.SourceTable source = currentResult == null ? null : currentResult.sourceTable();
+        if (source == null || selectedRow < 0 || selectedRow >= rawRows.size()
+                || selectedColumn < 0 || selectedColumn >= source.columnNames().size()) {
+            return;
+        }
+        String column = source.columnNames().get(selectedColumn);
+        owner.openForeignKeyRows(source, column, rawRows.get(selectedRow), foreignKeyLookup);
     }
 
     private void copyField() {
@@ -916,6 +947,7 @@ final class QueryTab {
         elapsedMillis = 0;
         selectedRow = -1;
         selectedColumn = 0;
+        foreignKeyLookup = new ForeignKeyLookup(List.of(), false, false);
         sortColumn = -1;
         sortAscending = true;
         resultInfo.setText("No results");

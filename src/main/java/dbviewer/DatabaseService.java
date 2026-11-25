@@ -12,6 +12,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -155,6 +156,222 @@ public final class DatabaseService {
             return actual == null || actual.isBlank();
         }
         return expected.equalsIgnoreCase(actual);
+    }
+
+    /**
+     * Returns the foreign keys declared on a table, grouped by constraint. Each reference lists
+     * source columns and the columns they point at, in key sequence order.
+     */
+    public List<ForeignKeyReference> importedKeys(TableInfo table) throws SQLException {
+        requireConnection();
+        Map<String, List<KeyPart>> grouped = new LinkedHashMap<>();
+        try (ResultSet rs = connection.getMetaData().getImportedKeys(
+                nullable(table.catalog()), nullable(table.schema()), table.name())) {
+            while (rs.next()) {
+                String sourceTable = rs.getString("FKTABLE_NAME");
+                if (!sameIdentifier(table.name(), sourceTable)
+                        || (!table.catalog().isBlank()
+                                && !sameIdentifier(table.catalog(), rs.getString("FKTABLE_CAT")))
+                        || (!table.schema().isBlank()
+                                && !sameIdentifier(table.schema(), rs.getString("FKTABLE_SCHEM")))) {
+                    continue;
+                }
+                TableInfo target = new TableInfo(rs.getString("PKTABLE_CAT"),
+                        rs.getString("PKTABLE_SCHEM"), rs.getString("PKTABLE_NAME"), "TABLE");
+                if (target.name().isBlank()) {
+                    continue;
+                }
+                String constraint = rs.getString("FK_NAME");
+                String group = (constraint == null ? "" : constraint) + '\u0000'
+                        + target.catalog() + '\u0000' + target.schema() + '\u0000' + target.name();
+                grouped.computeIfAbsent(group, key -> new ArrayList<>()).add(new KeyPart(
+                        rs.getShort("KEY_SEQ"), rs.getString("FKCOLUMN_NAME"), target,
+                        rs.getString("PKCOLUMN_NAME")));
+            }
+        }
+
+        List<ForeignKeyReference> references = new ArrayList<>();
+        for (Map.Entry<String, List<KeyPart>> entry : grouped.entrySet()) {
+            List<KeyPart> parts = entry.getValue();
+            parts.sort(Comparator.comparingInt(KeyPart::sequence));
+            List<String> foreignColumns = new ArrayList<>();
+            List<String> referencedColumns = new ArrayList<>();
+            for (KeyPart part : parts) {
+                if (part.column() != null && !part.column().isBlank()
+                        && part.referencedColumn() != null && !part.referencedColumn().isBlank()) {
+                    foreignColumns.add(part.column());
+                    referencedColumns.add(part.referencedColumn());
+                }
+            }
+            if (!foreignColumns.isEmpty()) {
+                String name = entry.getKey().substring(0, entry.getKey().indexOf('\u0000'));
+                references.add(new ForeignKeyReference(name, parts.get(0).target(),
+                        foreignColumns, referencedColumns));
+            }
+        }
+        return references;
+    }
+
+    private record KeyPart(short sequence, String column, TableInfo target, String referencedColumn) {
+    }
+
+    /**
+     * Guesses targets when the database has no declared constraint: tables with a primary key
+     * column whose name matches the column, e.g. {@code owner_id} to {@code owners(id)}.
+     */
+    public List<ForeignKeyReference> candidateReferences(TableInfo source, String column)
+            throws SQLException {
+        requireConnection();
+        if (column == null || column.isBlank()) {
+            return List.of();
+        }
+        Map<String, ForeignKeyReference> found = new LinkedHashMap<>();
+        for (String candidate : candidateColumnNames(column)) {
+            int before = found.size();
+            try (ResultSet rs = connection.getMetaData().getColumns(
+                    nullable(source.catalog()), nullable(source.schema()), "%", candidate)) {
+                while (rs.next()) {
+                    String name = rs.getString("TABLE_NAME");
+                    String columnName = rs.getString("COLUMN_NAME");
+                    if (name == null || name.isBlank() || !sameIdentifier(candidate, columnName)
+                            || sameIdentifier(source.name(), name)) {
+                        continue;
+                    }
+                    String catalog = rs.getString("TABLE_CAT");
+                    String schema = rs.getString("TABLE_SCHEM");
+                    if (!source.catalog().isBlank() && !sameIdentifier(source.catalog(), catalog)) {
+                        continue;
+                    }
+                    if (!source.schema().isBlank() && !sameIdentifier(source.schema(), schema)) {
+                        continue;
+                    }
+                    List<String> keys = primaryKeys(catalog, schema, name);
+                    String key = keys.stream()
+                            .filter(k -> sameIdentifier(k, columnName))
+                            .findFirst().orElse(null);
+                    if (key == null) {
+                        continue;
+                    }
+                    TableInfo target = new TableInfo(catalog, schema, name, "TABLE");
+                    found.putIfAbsent(targetKey(target), new ForeignKeyReference("",
+                            target, List.of(column), List.of(key)));
+                }
+            }
+            // A nearer match (team_id) makes generic ones (id) unnecessary noise.
+            if (found.size() > before) {
+                break;
+            }
+        }
+        List<ForeignKeyReference> references = new ArrayList<>(found.values());
+        references.sort(Comparator
+                .comparingInt((ForeignKeyReference ref) -> nameRelevance(ref.referencedTable().name(), column))
+                .thenComparing(ref -> ref.referencedTable().name(), String.CASE_INSENSITIVE_ORDER));
+        return references;
+    }
+
+    private static List<String> candidateColumnNames(String column) {
+        Set<String> names = new LinkedHashSet<>();
+        names.add(column);
+        String base = baseName(column);
+        if (!base.isEmpty() && !base.equalsIgnoreCase(column)) {
+            names.add(base);
+            names.add(base + "_id");
+        }
+        String lower = column.toLowerCase(Locale.ROOT);
+        if (lower.endsWith("_id") || lower.endsWith("id")) {
+            names.add("id");
+        }
+        return new ArrayList<>(names);
+    }
+
+    private static String baseName(String column) {
+        String lower = column.toLowerCase(Locale.ROOT);
+        if (lower.endsWith("_id")) {
+            return lower.substring(0, lower.length() - 3);
+        }
+        if (lower.endsWith("id") && lower.length() > 2) {
+            return lower.substring(0, lower.length() - 2);
+        }
+        return lower;
+    }
+
+    private static int nameRelevance(String tableName, String column) {
+        String base = baseName(column);
+        String name = tableName.toLowerCase(Locale.ROOT);
+        if (!base.isEmpty() && name.equals(base)) {
+            return 0;
+        }
+        if (!base.isEmpty() && (name.equals(base + "s") || name.equals(base + "ies"))) {
+            return 1;
+        }
+        return 2;
+    }
+
+    private static String targetKey(TableInfo table) {
+        return (table.catalog() + '\u0000' + table.schema() + '\u0000' + table.name())
+                .toLowerCase(Locale.ROOT);
+    }
+
+    /** Builds a SELECT for the referenced rows, using the values in one result row. */
+    public String referencedRowsSql(ForeignKeyReference reference, QueryResult.SourceTable source,
+            Object[] row) throws SQLException {
+        requireConnection();
+        if (source == null) {
+            throw new SQLException("This result set cannot be mapped to a table.");
+        }
+        String dbType = profile == null ? "" : profile.dbType();
+        StringBuilder sql = new StringBuilder("SELECT * FROM ")
+                .append(reference.referencedTable().qualifiedName(dbType)).append(" WHERE ");
+        for (int i = 0; i < reference.foreignColumns().size(); i++) {
+            if (i > 0) {
+                sql.append(" AND ");
+            }
+            String foreign = reference.foreignColumns().get(i);
+            int index = columnIndex(source.columnNames(), foreign);
+            if (index < 0) {
+                throw new SQLException("The query must include the foreign key column(s): "
+                        + String.join(", ", reference.foreignColumns()));
+            }
+            Object value = row != null && index < row.length ? row[index] : null;
+            sql.append(TableInfo.quoteIdentifier(reference.referencedColumns().get(i), dbType));
+            if (value == null) {
+                sql.append(" IS NULL");
+            } else {
+                sql.append(" = ").append(sqlLiteral(value, dbType));
+            }
+        }
+        return sql.toString();
+    }
+
+    /** Returns a SQL literal for a value read from a result set. */
+    public static String sqlLiteral(Object value) {
+        return sqlLiteral(value, "");
+    }
+
+    private static String sqlLiteral(Object value, String dbType) {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return value.toString();
+        }
+        if (value instanceof byte[] bytes) {
+            StringBuilder hex = new StringBuilder("X'");
+            for (byte b : bytes) {
+                hex.append(Character.forDigit((b >> 4) & 0xf, 16))
+                        .append(Character.forDigit(b & 0xf, 16));
+            }
+            return hex.append('\'').toString();
+        }
+        String text = value.toString();
+        if ("mysql".equalsIgnoreCase(dbType)) {
+            text = text.replace("\\", "\\\\");
+        }
+        return "'" + text.replace("'", "''") + "'";
+    }
+
+    private static String nullable(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /** Executes a SQL script. If it produces result sets, the last one is returned. */

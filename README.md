@@ -20,7 +20,8 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   the system's dark theme with bright keywords, strings and numbers.
 - **Bottom pane** — a virtualized results table in each tab, with column headers that sort the
   rows ascending/descending using natural ordering (`item2` before `item10`), and a context menu
-  to copy a field, copy rows (tab-separated), or delete rows from the database after a confirmation.
+  to copy a field, copy rows (tab-separated), follow a foreign-key value to the matching rows in a
+  new query tab, or delete rows from the database after a confirmation.
   Shows row count and execution time; update statements show the affected-row count.
 - **Editable results** — when a query returns a single table and includes its primary key column(s),
   click any cell to edit it (Enter/F2 also works). Type in the blank **`(new row)`** line under the
@@ -90,6 +91,10 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
   cell empty to let the database supply its default (for example an auto-incrementing key) and use
   `''` to insert an empty string. After saving, a single-select query is re-run so generated keys
   appear. Numeric, boolean, date and time values are converted using the column's JDBC type.
+- **Open Referenced Rows** appears when a result cell can be followed to another table's primary
+  key. Declared foreign keys are used when the database exposes them; otherwise compatible tables
+  are offered as a list, with a *Remember this table for the session* checkbox. The generated
+  `SELECT` runs in a new tab. Session choices are cleared when the connection changes.
 - Status bar messages are shortened to fit the window; hover over them for the full text.
 - Queries run on the UI thread with a wait cursor. Long-running statements will block
   the window until they finish.

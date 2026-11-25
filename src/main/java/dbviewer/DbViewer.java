@@ -2,7 +2,9 @@ package dbviewer;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -48,6 +50,8 @@ public final class DbViewer {
     private Font monoFont;
     private List<TableInfo> allTables = List.of();
     private List<TableInfo> visibleTables = List.of();
+    /** Foreign-key choices made without a constraint, kept until the connection changes. */
+    private final Map<String, ForeignKeyReference> rememberedForeignKeys = new HashMap<>();
     private String connectionText = "Not connected";
     private String statusText = "";
 
@@ -295,6 +299,7 @@ public final class DbViewer {
         }
         try {
             database.connect(profile);
+            rememberedForeignKeys.clear();
             setStatus("Connected to " + profile.name() + ".", false);
             loadTables();
         } catch (SQLException e) {
@@ -306,6 +311,7 @@ public final class DbViewer {
 
     private void disconnect() {
         database.disconnect();
+        rememberedForeignKeys.clear();
         allTables = List.of();
         populateTableList();
         for (QueryTab tab : tabs.allTabs()) {
@@ -427,6 +433,82 @@ public final class DbViewer {
         String sql = "SELECT * FROM " + table.qualifiedName(database.profile().dbType());
         tab.insertQuery(sql);
         tab.runAll();
+    }
+
+    /** Finds declared foreign keys first, then remembered choices, then likely target tables. */
+    ForeignKeyLookup foreignKeyLookup(QueryResult.SourceTable source, String column) {
+        if (source == null || source.table().isBlank() || column == null || column.isBlank()) {
+            return new ForeignKeyLookup(List.of(), false, false);
+        }
+        TableInfo table = new TableInfo(source.catalog(), source.schema(), source.table(), "TABLE");
+        List<ForeignKeyReference> declared = List.of();
+        try {
+            declared = database.importedKeys(table).stream()
+                    .filter(ref -> ref.hasColumn(column)).toList();
+        } catch (SQLException ignored) {
+            // Some drivers expose no constraint metadata; fall back to name matching.
+        }
+        if (!declared.isEmpty()) {
+            return new ForeignKeyLookup(declared, false, false);
+        }
+        ForeignKeyReference remembered = rememberedForeignKeys.get(foreignKeyKey(source, column));
+        if (remembered != null) {
+            return new ForeignKeyLookup(List.of(remembered), false, true);
+        }
+        try {
+            return new ForeignKeyLookup(database.candidateReferences(table, column), true, false);
+        } catch (SQLException e) {
+            setStatus("Could not read table metadata: " + messageOf(e), true);
+            return new ForeignKeyLookup(List.of(), false, false);
+        }
+    }
+
+    /** Opens the rows a foreign-key value points at in a fresh query tab. */
+    void openForeignKeyRows(QueryResult.SourceTable source, String column, Object[] row,
+            ForeignKeyLookup lookup) {
+        if (!database.isConnected()) {
+            showInfo("Connect to a database first.");
+            return;
+        }
+        if (lookup.options().isEmpty()) {
+            showInfo("No foreign key or matching primary key was found for " + column + ".");
+            return;
+        }
+
+        ForeignKeyReference target = lookup.options().get(0);
+        boolean remember = false;
+        if (!lookup.remembered() && (lookup.inferred() || lookup.options().size() > 1)) {
+            ConnectionProfile profile = database.profile();
+            String dbType = profile == null ? "" : profile.dbType();
+            ForeignKeyChoiceDialog dialog = new ForeignKeyChoiceDialog(shell);
+            target = dialog.open(column, dbType, lookup.options(), lookup.inferred());
+            if (target == null) {
+                return;
+            }
+            remember = dialog.remember();
+        }
+        if (lookup.inferred() && remember && source != null) {
+            rememberedForeignKeys.put(foreignKeyKey(source, column), target);
+        }
+
+        try {
+            String sql = database.referencedRowsSql(target, source, row);
+            tabs.newTab();
+            QueryTab tab = activeTab();
+            if (tab == null) {
+                return;
+            }
+            tab.insertQuery(sql);
+            tab.runAll();
+        } catch (SQLException e) {
+            reportError("Could not open referenced rows", e);
+            setStatus("Could not open referenced rows: " + messageOf(e), true);
+        }
+    }
+
+    private static String foreignKeyKey(QueryResult.SourceTable source, String column) {
+        return (source.catalog() + '\u0000' + source.schema() + '\u0000'
+                + source.table() + '\u0000' + column).toLowerCase(Locale.ROOT);
     }
 
     private void runQuery() {
