@@ -71,6 +71,10 @@ public final class DbViewer {
         monoFont = new Font(display, fontData);
 
         shell.addListener(SWT.Dispose, e -> {
+            QueryCancel cancel = activeCancel;
+            if (cancel != null) {
+                cancel.cancel();
+            }
             database.disconnect();
             if (monoFont != null && !monoFont.isDisposed()) {
                 monoFont.dispose();
@@ -98,11 +102,13 @@ public final class DbViewer {
         try {
             new DbViewer(display).run();
         } finally {
-            display.dispose();
+            if (!display.isDisposed()) {
+                display.dispose();
+            }
         }
     }
 
-    /** Opens the window and runs the SWT event loop. */
+    /** Opens the window, runs the SWT event loop, and exits when the window closes. */
     public void run() {
         updateConnectionUi();
         setStatus("Ready. Connect to a database to begin.", false);
@@ -112,6 +118,11 @@ public final class DbViewer {
                 display.sleep();
             }
         }
+        if (!display.isDisposed()) {
+            display.dispose();
+        }
+        // Closing the window is an application exit, not just the end of the event loop.
+        System.exit(0);
     }
 
     private void createMenuBar() {
