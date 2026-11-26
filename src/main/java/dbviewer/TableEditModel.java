@@ -206,6 +206,101 @@ final class TableEditModel {
         entry.texts[column] = value;
     }
 
+    /**
+     * Applies a block of pasted rows starting at {@code startRow} and always from the first
+     * column. Rows past the end of the result become new rows. The block must have one value
+     * per column, and every value must be valid for its column.
+     *
+     * @return a message describing why the block was rejected, or null when it was applied
+     */
+    String paste(int startRow, List<String[]> block) {
+        if (block == null || block.isEmpty()) {
+            return "The clipboard does not contain any rows to paste.";
+        }
+        if (startRow < 0 || startRow > rows.size()) {
+            return "Select a row in the results before pasting.";
+        }
+
+        int width = 0;
+        for (String[] blockRow : block) {
+            width = Math.max(width, blockRow == null ? 0 : blockRow.length);
+        }
+        if (width == 0) {
+            return "The clipboard does not contain any values to paste.";
+        }
+        if (width != columns.size()) {
+            return "The pasted data has " + width + (width == 1 ? " column" : " columns")
+                    + ", but the results table has " + columns.size()
+                    + (columns.size() == 1 ? " column." : " columns.")
+                    + " Paste whole rows starting from the first column.";
+        }
+
+        for (int rowIndex = 0; rowIndex < block.size(); rowIndex++) {
+            String[] blockRow = block.get(rowIndex);
+            for (int column = 0; column < width; column++) {
+                String text = blockRow != null && column < blockRow.length && blockRow[column] != null
+                        ? blockRow[column] : "";
+                if (!isColumnEditable(column)) {
+                    if (!text.isEmpty()) {
+                        return "Column " + columns.get(column)
+                                + " is not a table column and cannot be edited.";
+                    }
+                    continue;
+                }
+                try {
+                    JdbcValues.parse(text, columnType(column));
+                } catch (IllegalArgumentException e) {
+                    return "Row " + (startRow + rowIndex + 1) + ", column "
+                            + columns.get(column) + ": " + e.getMessage();
+                }
+            }
+        }
+
+        int originalRowCount = rows.size();
+        for (int rowIndex = 0; rowIndex < block.size(); rowIndex++) {
+            String[] blockRow = block.get(rowIndex);
+            int targetRow = startRow + rowIndex;
+            if (targetRow >= originalRowCount) {
+                rows.add(new Row(columns.size(), null, true));
+            }
+            Row entry = rows.get(targetRow);
+            for (int column = 0; column < width; column++) {
+                if (!isColumnEditable(column)) {
+                    continue;
+                }
+                String text = blockRow != null && column < blockRow.length && blockRow[column] != null
+                        ? blockRow[column] : "";
+                applyPastedValue(entry, column, text);
+            }
+        }
+
+        // Blank lines at the end of a pasted block should not leave empty new rows behind.
+        while (rows.size() > originalRowCount) {
+            Row last = rows.get(rows.size() - 1);
+            if (last.isNew && !hasNewContent(last)) {
+                rows.remove(rows.size() - 1);
+            } else {
+                break;
+            }
+        }
+        return null;
+    }
+
+    private static void applyPastedValue(Row entry, int column, String value) {
+        if (entry.isNew) {
+            entry.edited[column] = !value.isEmpty();
+            entry.texts[column] = value.isEmpty() ? null : value;
+            return;
+        }
+        if (value.equals(CellFormatter.format(entry.original[column]))) {
+            entry.edited[column] = false;
+            entry.texts[column] = null;
+        } else {
+            entry.edited[column] = true;
+            entry.texts[column] = value;
+        }
+    }
+
     /** Builds the changes to apply and the human-readable summary shown in the confirmation. */
     Changes changes(String dbType) {
         List<DatabaseService.RowUpdate> updates = new ArrayList<>();

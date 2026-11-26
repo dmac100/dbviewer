@@ -57,6 +57,7 @@ final class QueryTab {
     private MenuItem copyFieldItem;
     private MenuItem copyRowItem;
     private MenuItem copyAllItem;
+    private MenuItem pasteItem;
     private MenuItem exportCsvItem;
     private MenuItem openForeignKeyItem;
     private MenuItem deleteRowItem;
@@ -365,6 +366,12 @@ final class QueryTab {
         table.addListener(SWT.KeyDown, e -> {
             if ((e.stateMask & SWT.MOD1) != 0 && (e.keyCode == 'c' || e.keyCode == 'C')) {
                 copySelectionAsCsv();
+                e.doit = false;
+            }
+        });
+        table.addListener(SWT.KeyDown, e -> {
+            if ((e.stateMask & SWT.MOD1) != 0 && (e.keyCode == 'v' || e.keyCode == 'V')) {
+                pasteFromClipboard();
                 e.doit = false;
             }
         });
@@ -756,6 +763,7 @@ final class QueryTab {
         copyFieldItem = contextAction(menu, "Copy Field", this::copyField);
         copyRowItem = contextAction(menu, "Copy Row", () -> copyRows(false));
         copyAllItem = contextAction(menu, "Copy All Rows", () -> copyRows(true));
+        pasteItem = contextAction(menu, "Paste", () -> pasteAt(selectedRow));
         exportCsvItem = contextAction(menu, "Export Results as CSV...", this::exportCsv);
         new MenuItem(menu, SWT.SEPARATOR);
         openForeignKeyItem = contextAction(menu, "Open Referenced Rows...", this::openForeignKey);
@@ -787,6 +795,7 @@ final class QueryTab {
         copyFieldItem.setEnabled(anyRow && selectedColumn < columns.size());
         copyRowItem.setEnabled(anyRow);
         copyAllItem.setEnabled(dataRowCount() > 0);
+        pasteItem.setEnabled(editModel != null);
         exportCsvItem.setEnabled(hasResults());
         deleteRowItem.setEnabled(existingRow && !pendingEdits);
 
@@ -867,6 +876,69 @@ final class QueryTab {
         copyToClipboard(csv.toString());
         owner.setStatus(selection.length + (selection.length == 1 ? " row" : " rows")
                 + " copied as CSV.", false);
+    }
+
+    /** Ctrl+V pastes at the current selection. */
+    private void pasteFromClipboard() {
+        int row = resultTable.getSelectionIndex();
+        if (row < 0) {
+            row = selectedRow >= 0 ? selectedRow : 0;
+        }
+        pasteAt(row);
+    }
+
+    /** Pastes tab-separated or CSV text as whole rows, starting from the first column. */
+    private void pasteAt(int startRow) {
+        if (editModel == null) {
+            if (!hasResults()) {
+                owner.setStatus("There are no results to paste into.", true);
+            } else {
+                owner.showWarning("This result set is read-only, so data cannot be pasted. "
+                        + "Include the table's primary key column(s) in the query to make it editable.");
+            }
+            return;
+        }
+
+        String text = readClipboardText();
+        if (text == null || text.isEmpty()) {
+            owner.setStatus("The clipboard does not contain any text to paste.", true);
+            return;
+        }
+
+        List<String[]> block;
+        try {
+            block = PastedData.parse(text);
+        } catch (IllegalArgumentException e) {
+            owner.showWarning(e.getMessage());
+            return;
+        }
+        if (block.isEmpty()) {
+            owner.setStatus("The clipboard does not contain any rows to paste.", true);
+            return;
+        }
+
+        int row = Math.max(0, startRow);
+
+        closeCellEditor();
+        String warning = editModel.paste(row, block);
+        if (warning != null) {
+            owner.showWarning(warning);
+            owner.setStatus(warning, true);
+            return;
+        }
+        refreshResultTable();
+        owner.setStatus("Pasted " + block.size() + (block.size() == 1 ? " row" : " rows")
+                + ". Use Save Changes to write them to the database.", false);
+    }
+
+    private String readClipboardText() {
+        Clipboard clipboard = new Clipboard(resultTable.getDisplay());
+        try {
+            Object contents = clipboard.getContents(TextTransfer.getInstance());
+            return contents instanceof String text ? text : null;
+        } finally {
+            clipboard.dispose();
+        }
     }
 
     /** CSV records use the underlying JDBC values, not the shortened display text. */

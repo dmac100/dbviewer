@@ -688,6 +688,14 @@ public final class DbViewer {
         box.open();
     }
 
+    /** Shows a warning dialog, used when an action is rejected. */
+    void showWarning(String message) {
+        MessageBox box = new MessageBox(shell, SWT.ICON_WARNING | SWT.OK);
+        box.setText("DB Viewer");
+        box.setMessage(message);
+        box.open();
+    }
+
     /** Shows a Yes/No confirmation dialog for destructive actions. */
     boolean confirm(String question, String detail) {
         return confirm("Confirm Delete", question, detail);

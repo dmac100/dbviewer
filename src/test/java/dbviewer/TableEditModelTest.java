@@ -115,6 +115,71 @@ class TableEditModelTest {
         assertEquals("Cara", saved.get(2)[1]);
     }
 
+    @Test
+    void pastesValuesIntoExistingRowsAndAppendsNewOnes() {
+        TableEditModel model = model();
+
+        assertNull(model.paste(0, List.of(
+                new String[] {"1", "Ada"},
+                new String[] {"2", "Bob"},
+                new String[] {"3", "Cara"})));
+
+        assertEquals(3, model.rowCount());
+        assertEquals(1, model.newRowCount());
+        assertTrue(model.isDirty());
+
+        TableEditModel.Changes changes = model.changes("SQLite");
+        assertEquals(1, changes.inserts().size());
+        assertEquals(3, changes.inserts().get(0).values().get("id"));
+        assertEquals("Cara", changes.inserts().get(0).values().get("name"));
+    }
+
+    @Test
+    void pasteUpdatesExistingCellsAndCanStartAtANewRow() {
+        TableEditModel model = model();
+
+        assertNull(model.paste(0, List.<String[]>of(new String[] {"1", "Grace"})));
+        assertEquals("Grace", model.changes("SQLite").updates().get(0).values().get("name"));
+
+        assertNull(model.paste(2, List.<String[]>of(new String[] {"3", "Cara"})));
+        assertEquals(3, model.rowCount());
+        assertEquals(1, model.newRowCount());
+    }
+
+    @Test
+    void pasteRejectsAColumnCountThatDoesNotMatchTheTable() {
+        TableEditModel model = model();
+
+        String warning = model.paste(0, List.<String[]>of(new String[] {"1"}));
+
+        assertTrue(warning.contains("results table has 2 columns"));
+        assertFalse(model.isDirty());
+    }
+
+    @Test
+    void pasteRejectsValuesThatDoNotMatchTheColumnType() {
+        TableEditModel model = model();
+
+        String warning = model.paste(0, List.<String[]>of(new String[] {"not a number", "Ada"}));
+
+        assertTrue(warning.contains("Row 1"));
+        assertTrue(warning.contains("integer"));
+        assertFalse(model.isDirty());
+    }
+
+    @Test
+    void pasteRejectsValuesForColumnsThatCannotBeEdited() {
+        QueryResult.SourceTable source = new QueryResult.SourceTable("", "", "people",
+                List.of("id", ""), List.of(Types.INTEGER, Types.VARCHAR), List.of("id"));
+        TableEditModel model = TableEditModel.create(source, List.of("id", "computed"),
+                List.<Object[]>of(new Object[] {1, "x"}));
+
+        String warning = model.paste(0, List.<String[]>of(new String[] {"1", "value"}));
+
+        assertTrue(warning.contains("cannot be edited"));
+        assertFalse(model.isDirty());
+    }
+
     private TableEditModel model() {
         return TableEditModel.create(source(List.of("id", "name"),
                 List.of(Types.INTEGER, Types.VARCHAR), List.of("id")),
