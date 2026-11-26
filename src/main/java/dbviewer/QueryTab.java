@@ -58,6 +58,7 @@ final class QueryTab {
     private MenuItem copyRowItem;
     private MenuItem copyAllItem;
     private MenuItem pasteItem;
+    private MenuItem setNullItem;
     private MenuItem exportCsvItem;
     private MenuItem openForeignKeyItem;
     private MenuItem deleteRowItem;
@@ -70,6 +71,7 @@ final class QueryTab {
 
     private TableEditor cellEditor;
     private Text cellText;
+    private String editInitialText;
     private int editRow = -1;
     private int editColumn = -1;
     private boolean closingCellEditor;
@@ -388,12 +390,12 @@ final class QueryTab {
         Color foreground = resultTable.getForeground();
         int dataRows = dataRowCount();
 
+        Color nullForeground = owner.display().getSystemColor(SWT.COLOR_DARK_GRAY);
         if (editModel != null && index == dataRows) {
             for (int i = 0; i < resultTable.getColumnCount(); i++) {
                 rowItem.setBackground(i, background);
-                rowItem.setForeground(i, i == 0
-                        ? owner.display().getSystemColor(SWT.COLOR_DARK_GRAY) : foreground);
-                rowItem.setText(i, i == 0 ? "(new row)" : "");
+                rowItem.setForeground(i, nullForeground);
+                rowItem.setText(i, i == 0 ? "(new row)" : CellFormatter.NULL_TEXT);
             }
             return;
         }
@@ -404,15 +406,19 @@ final class QueryTab {
         for (int i = 0; i < resultTable.getColumnCount(); i++) {
             String text;
             boolean edited = false;
+            boolean isNull;
             if (editModel != null) {
                 text = editModel.displayText(index, i);
                 edited = editModel.isCellEdited(index, i);
+                isNull = editModel.isNull(index, i);
             } else {
                 String[] row = rows.get(index);
                 text = i < row.length && row[i] != null ? row[i] : "";
+                Object[] raw = index < rawRows.size() ? rawRows.get(index) : null;
+                isNull = raw != null && i < raw.length && raw[i] == null;
             }
             rowItem.setText(i, text);
-            rowItem.setForeground(i, foreground);
+            rowItem.setForeground(i, isNull ? nullForeground : foreground);
             rowItem.setBackground(i, edited
                     ? owner.display().getSystemColor(SWT.COLOR_INFO_BACKGROUND) : background);
         }
@@ -446,8 +452,8 @@ final class QueryTab {
     private String editHintText() {
         if (editModel != null) {
             return editModel.isDirty()
-                    ? "Unsaved changes. Click a cell to keep editing, or the last row to add one."
-                    : "Click a cell to edit; click the last row to add one.";
+                    ? "Unsaved changes. Click a cell to keep editing; right-click to set NULL."
+                    : "Click a cell to edit; right-click to set NULL; click the last row to add one.";
         }
         if (rows.isEmpty() || currentResult == null) {
             return "";
@@ -491,7 +497,9 @@ final class QueryTab {
 
         cellText = new Text(resultTable, SWT.NONE);
         cellText.setFont(resultTable.getFont());
-        cellText.setText(row == editModel.rowCount() ? "" : editModel.displayText(row, column));
+        editInitialText = row == editModel.rowCount()
+                ? CellFormatter.NULL_TEXT : editModel.displayText(row, column);
+        cellText.setText(editInitialText);
         cellText.selectAll();
         cellText.addListener(SWT.FocusOut, e -> {
             if (!closingCellEditor) {
@@ -526,6 +534,7 @@ final class QueryTab {
             return;
         }
         String text = cellText.getText();
+        String initialText = editInitialText;
         int row = editRow;
         int column = editColumn;
         closingCellEditor = true;
@@ -537,11 +546,12 @@ final class QueryTab {
         } finally {
             cellEditor = null;
             cellText = null;
+            editInitialText = null;
             editRow = -1;
             editColumn = -1;
             closingCellEditor = false;
         }
-        if (editModel != null) {
+        if (editModel != null && !text.equals(initialText)) {
             try {
                 editModel.setCell(row, column, text);
             } catch (IllegalArgumentException e) {
@@ -564,6 +574,7 @@ final class QueryTab {
         } finally {
             cellEditor = null;
             cellText = null;
+            editInitialText = null;
             editRow = -1;
             editColumn = -1;
             closingCellEditor = false;
@@ -764,6 +775,7 @@ final class QueryTab {
         copyRowItem = contextAction(menu, "Copy Row", () -> copyRows(false));
         copyAllItem = contextAction(menu, "Copy All Rows", () -> copyRows(true));
         pasteItem = contextAction(menu, "Paste", () -> pasteAt(selectedRow));
+        setNullItem = contextAction(menu, "Set Cell to NULL", this::setSelectedCellNull);
         exportCsvItem = contextAction(menu, "Export Results as CSV...", this::exportCsv);
         new MenuItem(menu, SWT.SEPARATOR);
         openForeignKeyItem = contextAction(menu, "Open Referenced Rows...", this::openForeignKey);
@@ -796,6 +808,9 @@ final class QueryTab {
         copyRowItem.setEnabled(anyRow);
         copyAllItem.setEnabled(dataRowCount() > 0);
         pasteItem.setEnabled(editModel != null);
+        setNullItem.setEnabled(editModel != null && selectedRow >= 0
+                && selectedRow <= editModel.rowCount() && selectedColumn >= 0
+                && editModel.isColumnEditable(selectedColumn));
         exportCsvItem.setEnabled(hasResults());
         deleteRowItem.setEnabled(existingRow && !pendingEdits);
 
@@ -931,6 +946,22 @@ final class QueryTab {
                 + ". Use Save Changes to write them to the database.", false);
     }
 
+    /** Sets the selected result cell to SQL NULL as a pending edit. */
+    private void setSelectedCellNull() {
+        if (editModel == null || selectedRow < 0 || selectedRow > editModel.rowCount()
+                || selectedColumn < 0 || !editModel.isColumnEditable(selectedColumn)) {
+            return;
+        }
+        closeCellEditor();
+        try {
+            editModel.setNull(selectedRow, selectedColumn);
+            refreshResultTable();
+            owner.setStatus("Cell set to NULL. Use Save Changes to store it.", false);
+        } catch (IllegalArgumentException e) {
+            owner.setStatus(e.getMessage(), true);
+        }
+    }
+
     private String readClipboardText() {
         Clipboard clipboard = new Clipboard(resultTable.getDisplay());
         try {
@@ -981,7 +1012,7 @@ final class QueryTab {
 
         try (BufferedWriter writer = Files.newBufferedWriter(
                 Path.of(path), StandardCharsets.UTF_8)) {
-            Csv.write(writer, columns, rows);
+            Csv.write(writer, columns, rawExportRows());
         } catch (IOException | RuntimeException e) {
             owner.reportError("Could not export results", e);
             owner.setStatus("Could not export results: " + e.getMessage(), true);
@@ -989,6 +1020,19 @@ final class QueryTab {
         }
         owner.setStatus("Exported " + rows.size() + (rows.size() == 1 ? " row" : " rows")
                 + " to " + path, false);
+    }
+
+    /** CSV export uses the underlying JDBC values, so NULL stays an empty CSV field. */
+    private List<String[]> rawExportRows() {
+        List<String[]> exported = new ArrayList<>(rawRows.size());
+        for (Object[] raw : rawRows) {
+            String[] fields = new String[columns.size()];
+            for (int i = 0; i < fields.length; i++) {
+                fields[i] = i < raw.length ? CellFormatter.rawText(raw[i]) : "";
+            }
+            exported.add(fields);
+        }
+        return exported;
     }
 
     private String defaultExportName() {

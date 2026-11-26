@@ -57,15 +57,27 @@ class TableEditModelTest {
 
         model.setCell(2, 1, "");
         model.setCell(2, 0, "");
-        assertEquals(2, model.rowCount());
-        assertFalse(model.isDirty());
+        assertEquals(3, model.rowCount());
+        assertTrue(model.isDirty());
+
+        DatabaseService.RowInsert blank = model.changes("SQLite").inserts().get(0);
+        assertEquals("", blank.values().get("id"));
+        assertEquals("", blank.values().get("name"));
     }
 
     @Test
-    void storesExplicitNullsAndRejectsInvalidNumbers() {
+    void storesExplicitNullsAndEmptyStringsSeparately() {
         TableEditModel model = model();
-        model.setCell(0, 1, JdbcValues.NULL_TEXT);
+        assertFalse(model.isNull(0, 1));
+        model.setNull(0, 1);
+        assertEquals(CellFormatter.NULL_TEXT, model.displayText(0, 1));
+        assertTrue(model.isNull(0, 1));
         assertNull(model.changes("SQLite").updates().get(0).values().get("name"));
+
+        model.setCell(0, 1, "");
+        assertEquals(CellFormatter.EMPTY_TEXT, model.displayText(0, 1));
+        assertFalse(model.isNull(0, 1));
+        assertEquals("", model.changes("SQLite").updates().get(0).values().get("name"));
 
         model.setCell(0, 0, "not a number");
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
@@ -97,7 +109,10 @@ class TableEditModelTest {
                 List.of(Types.INTEGER, Types.VARCHAR), List.of("id"));
         TableEditModel model = TableEditModel.create(
                 source, List.of("id", "name"), List.of());
+
         model.setCell(0, 1, "Ada");
+        assertEquals(CellFormatter.NULL_TEXT, model.displayText(0, 0));
+        assertEquals("Ada", model.displayText(0, 1));
         assertEquals(1, model.changes("SQLite").inserts().size());
     }
 
@@ -144,6 +159,18 @@ class TableEditModelTest {
         assertNull(model.paste(2, List.<String[]>of(new String[] {"3", "Cara"})));
         assertEquals(3, model.rowCount());
         assertEquals(1, model.newRowCount());
+    }
+
+    @Test
+    void pastedBlankFieldsBecomeEmptyStrings() {
+        TableEditModel model = model();
+
+        assertNull(model.paste(2, List.<String[]>of(new String[] {"", ""})));
+
+        assertEquals(3, model.rowCount());
+        DatabaseService.RowInsert row = model.changes("SQLite").inserts().get(0);
+        assertEquals("", row.values().get("id"));
+        assertEquals("", row.values().get("name"));
     }
 
     @Test

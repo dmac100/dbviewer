@@ -150,7 +150,7 @@ final class TableEditModel {
         return validColumn(column) && !tableColumns.get(column).isBlank();
     }
 
-    /** The text shown in a cell, including pending edits and blank new rows. */
+    /** The text shown in a cell, including pending edits and the NULL values in new rows. */
     String displayText(int row, int column) {
         if (!validRow(row) || !validColumn(column)) {
             return "";
@@ -160,50 +160,61 @@ final class TableEditModel {
             return entry.texts[column];
         }
         if (entry.isNew) {
-            return "";
+            return CellFormatter.NULL_TEXT;
         }
         return CellFormatter.format(entry.original[column]);
     }
 
+    /** True when the cell currently represents SQL NULL, including an edited NULL value. */
+    boolean isNull(int row, int column) {
+        if (!validRow(row) || !validColumn(column)) {
+            return false;
+        }
+        Row entry = rows.get(row);
+        if (entry.edited[column]) {
+            return CellFormatter.NULL_TEXT.equals(entry.texts[column]);
+        }
+        return entry.isNew || entry.original[column] == null;
+    }
+
     /**
-     * Records a cell's new text. Passing the displayed original text again clears the edit.
-     * A row index one past the last row creates a new row first.
+     * Records a cell's new text. A blank text stores an empty string; use {@link #setNull} for SQL
+     * NULL. Passing the unchanged displayed text clears the edit. A row index one past the last
+     * row creates a new row first.
      */
     void setCell(int row, int column, String text) {
         if (!validColumn(column)) {
-            return;
-        }
-        String value = text == null ? "" : text;
-        if (row == rows.size()) {
-            if (value.isEmpty()) {
-                return;
-            }
-            rows.add(new Row(columns.size(), null, true));
-        }
-        if (!validRow(row)) {
             return;
         }
         if (!isColumnEditable(column)) {
             throw new IllegalArgumentException(
                     "Column " + columns.get(column) + " is not a table column and cannot be edited.");
         }
+        String value = text == null || text.isEmpty() ? CellFormatter.EMPTY_TEXT : text;
+        if (row == rows.size()) {
+            rows.add(new Row(columns.size(), null, true));
+        }
+        if (!validRow(row)) {
+            return;
+        }
 
         Row entry = rows.get(row);
         if (!entry.isNew && value.equals(CellFormatter.format(entry.original[column]))) {
-            entry.edited[column] = false;
-            entry.texts[column] = null;
-            return;
-        }
-        if (entry.isNew && value.isEmpty()) {
-            entry.edited[column] = false;
-            entry.texts[column] = null;
-            if (!hasNewContent(entry)) {
-                rows.remove(row);
-            }
+            clearCell(entry, column);
             return;
         }
         entry.edited[column] = true;
         entry.texts[column] = value;
+    }
+
+    /** Marks one cell as explicitly SQL NULL. */
+    void setNull(int row, int column) {
+        setCell(row, column, CellFormatter.NULL_TEXT);
+    }
+
+    private static void clearCell(Row entry, int column) {
+        entry.edited[column] = false;
+        entry.texts[column] = null;
     }
 
     /**
@@ -274,30 +285,21 @@ final class TableEditModel {
             }
         }
 
-        // Blank lines at the end of a pasted block should not leave empty new rows behind.
-        while (rows.size() > originalRowCount) {
-            Row last = rows.get(rows.size() - 1);
-            if (last.isNew && !hasNewContent(last)) {
-                rows.remove(rows.size() - 1);
-            } else {
-                break;
-            }
-        }
         return null;
     }
 
     private static void applyPastedValue(Row entry, int column, String value) {
+        String stored = value.isEmpty() ? CellFormatter.EMPTY_TEXT : value;
         if (entry.isNew) {
-            entry.edited[column] = !value.isEmpty();
-            entry.texts[column] = value.isEmpty() ? null : value;
+            entry.edited[column] = true;
+            entry.texts[column] = stored;
             return;
         }
-        if (value.equals(CellFormatter.format(entry.original[column]))) {
-            entry.edited[column] = false;
-            entry.texts[column] = null;
+        if (stored.equals(CellFormatter.format(entry.original[column]))) {
+            clearCell(entry, column);
         } else {
             entry.edited[column] = true;
-            entry.texts[column] = value;
+            entry.texts[column] = stored;
         }
     }
 
@@ -318,8 +320,7 @@ final class TableEditModel {
                 newRowNumber++;
                 LinkedHashMap<String, Object> values = new LinkedHashMap<>();
                 for (int column = 0; column < columns.size(); column++) {
-                    if (row.edited[column] && row.texts[column] != null
-                            && !row.texts[column].isEmpty()) {
+                    if (row.edited[column]) {
                         values.put(columnName(column),
                                 JdbcValues.parse(row.texts[column], columnType(column)));
                     }
@@ -439,7 +440,7 @@ final class TableEditModel {
             return JdbcValues.NULL_TEXT;
         }
         if (value instanceof CharSequence || value instanceof Character) {
-            String text = CellFormatter.format(value).replace("'", "''");
+            String text = value.toString().replace("'", "''");
             return "'" + text + "'";
         }
         return CellFormatter.format(value);
@@ -468,8 +469,8 @@ final class TableEditModel {
     }
 
     private static boolean hasNewContent(Row row) {
-        for (int column = 0; column < row.edited.length; column++) {
-            if (row.edited[column] && row.texts[column] != null && !row.texts[column].isEmpty()) {
+        for (boolean edit : row.edited) {
+            if (edit) {
                 return true;
             }
         }

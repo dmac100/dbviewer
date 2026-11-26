@@ -12,10 +12,11 @@ import org.junit.jupiter.api.Test;
 class CellFormatterTest {
 
     @Test
-    void keepsShortTextAndNullEmpty() {
+    void marksNullAndEmptyStringsSeparately() {
         assertEquals("Ada", CellFormatter.format("Ada"));
         assertEquals(123, Integer.parseInt(CellFormatter.format(123)));
-        assertEquals("", CellFormatter.format(null));
+        assertEquals(CellFormatter.NULL_TEXT, CellFormatter.format(null));
+        assertEquals(CellFormatter.EMPTY_TEXT, CellFormatter.format(""));
     }
 
     @Test
@@ -47,6 +48,7 @@ class CellFormatterTest {
                 CellFormatter.rawText("first\nsecond\ttabbed\rreturn"));
         assertEquals("123", CellFormatter.rawText(123));
         assertEquals("", CellFormatter.rawText(null));
+        assertEquals("", CellFormatter.rawText(""));
 
         assertEquals("AQID", CellFormatter.rawText(new byte[] {1, 2, 3}));
         assertEquals("AQ==", CellFormatter.rawText(ByteBuffer.wrap(new byte[] {1})));

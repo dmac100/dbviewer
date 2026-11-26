@@ -28,9 +28,9 @@ class JdbcValuesTest {
         assertEquals(Boolean.TRUE, JdbcValues.parse("true", Types.BOOLEAN));
         assertEquals(Date.valueOf("2026-01-02"), JdbcValues.parse("2026-01-02", Types.DATE));
         assertEquals("", JdbcValues.parse("", Types.VARCHAR));
+        assertEquals("", JdbcValues.parse("", Types.INTEGER));
         assertEquals("", JdbcValues.parse(JdbcValues.EMPTY_TEXT, Types.VARCHAR));
         assertNull(JdbcValues.parse(JdbcValues.NULL_TEXT, Types.VARCHAR));
-        assertNull(JdbcValues.parse("", Types.INTEGER));
     }
 
     @Test

@@ -14,16 +14,26 @@ public final class CellFormatter {
     /** Displayed for values that are not meaningful to show as text. */
     public static final String BINARY_TEXT = "[BINARY]";
 
+    /** Displayed for SQL NULL so it is distinct from an empty string. */
+    public static final String NULL_TEXT = "[NULL]";
+
+    /** Displayed for an empty string so it is distinct from SQL NULL. */
+    public static final String EMPTY_TEXT = "''";
+
     private CellFormatter() {
     }
 
     /**
-     * Returns display text for a value: binary data becomes {@link #BINARY_TEXT},
-     * line breaks and other control characters are escaped, and long values are cut short.
+     * Returns display text for a value: SQL NULL and empty strings get visible markers, binary
+     * data becomes {@link #BINARY_TEXT}, line breaks and other control characters are escaped,
+     * and long values are cut short.
      */
     public static String format(Object value) {
         if (value == null) {
-            return "";
+            return NULL_TEXT;
+        }
+        if (value instanceof CharSequence text && text.isEmpty()) {
+            return EMPTY_TEXT;
         }
         if (isBinary(value)) {
             return BINARY_TEXT;

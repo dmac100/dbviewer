@@ -27,14 +27,16 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   **Ctrl+C** copies the selected rows as CSV; *Query → Export Results as CSV...* saves all rows
   with a header line. Shows row count and execution time; update statements show the affected-row count.
 - **Editable results** — when a query returns a single table and includes its primary key column(s),
-  click any cell to edit it (Enter/F2 also works). Type in the blank **`(new row)`** line under the
-  results to add rows. **Ctrl+V** (or *Paste* in the results context menu) pastes tab-separated or
-  CSV text as whole rows starting from the first column of the selected row. Each pasted row must
-  have one value per column, and every value must be valid for its column type, otherwise a warning
-  explains the problem and nothing is pasted. Changed cells are highlighted; **Cancel Changes** discards them
-  and **Save Changes** shows a summary of the updates and inserts before writing them to the database
-  in one transaction. Results from joins, views without keys and queries that omit the primary key
-  stay read-only.
+  click any cell to edit it (Enter/F2 also works). Type in the **`(new row)`** line under the results
+  to add rows; new cells start as `[NULL]`. SQL NULL is displayed as `[NULL]` in grey and an empty
+  string as `''`, so they can be told apart. Clearing a cell stores an empty string; choose *Set Cell to NULL*
+  in the results context menu to store NULL instead. **Ctrl+V** (or *Paste* in the context menu)
+  pastes tab-separated or CSV text as whole rows starting from the first column of the selected row.
+  Each pasted row must have one value per column, and every value must be valid for its column type,
+  otherwise a warning explains the problem and nothing is pasted. Changed cells are highlighted;
+  **Cancel Changes** discards them and **Save Changes** shows a summary of the updates and inserts
+  before writing them to the database in one transaction. Results from joins, views without keys and
+  queries that omit the primary key stay read-only.
 - JDBC drivers bundled for **SQLite**, **MySQL**, and **PostgreSQL**. Any other JDBC driver
   can be used by choosing *Generic JDBC* and adding its jar to the classpath/dependencies.
 - Optional **SSH tunnel**: enable it in the connection dialog to reach a remote database through
@@ -94,9 +96,10 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
 - **Delete Row(s)** asks for confirmation, then issues a `DELETE` for the selected rows. Tables
   with a primary key are matched by that key; otherwise all columns in the result are used. If a
   query omits the primary key column, deletion is refused.
-- Editable cells use the values exactly as typed. Type `<NULL>` for SQL NULL; in a new row, leave a
-  cell empty to let the database supply its default (for example an auto-incrementing key) and use
-  `''` to insert an empty string. After saving, a single-select query is re-run so generated keys
+- Editable cells use the values exactly as typed. SQL NULL is shown as `[NULL]` and can be set with
+  the context menu; a blank edit stores an empty string, displayed as `''`. New rows show `[NULL]` in
+  unedited cells, which are omitted from the INSERT so database defaults (for example an
+  auto-incrementing key) still apply. After saving, a single-select query is re-run so generated keys
   appear. Numeric, boolean, date and time values are converted using the column's JDBC type.
 - Pasting accepts tab-separated text (for example from a spreadsheet) or CSV, including quoted
   fields with commas and line breaks. The block is placed from the first column of the selected row

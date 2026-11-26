@@ -6,13 +6,13 @@ import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.time.chrono.IsoChronology;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.time.ZoneOffset;
+import java.time.chrono.IsoChronology;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
@@ -26,11 +26,11 @@ import java.util.Locale;
 /** Converts text typed into an editable result cell back into a JDBC value. */
 final class JdbcValues {
 
-    /** Typed by the user to store an explicit SQL NULL in a cell. */
-    static final String NULL_TEXT = "<NULL>";
+    /** Text used to store an explicit SQL NULL in a cell. */
+    static final String NULL_TEXT = CellFormatter.NULL_TEXT;
 
-    /** Typed by the user to store an empty string, which is distinct from an omitted value. */
-    static final String EMPTY_TEXT = "''";
+    /** Text used to store an empty string, which is distinct from SQL NULL. */
+    static final String EMPTY_TEXT = CellFormatter.EMPTY_TEXT;
 
     private static List<DateTimeFormatter> dateFormats() {
         return List.of(
@@ -70,9 +70,9 @@ final class JdbcValues {
     }
 
     /**
-     * Parses one cell's text for a column of {@code sqlType}. An empty text means NULL for
-     * non-character columns and an empty string for character columns. Dates and times accept
-     * ISO values as well as the common slash, 12-hour and space-separated forms.
+     * Parses one cell's text for a column of {@code sqlType}. A blank text stores an empty string;
+     * SQL NULL has its own marker, normally set from the results context menu. Dates and times
+     * accept ISO values as well as the common slash, 12-hour and space-separated forms.
      */
     static Object parse(String text, int sqlType) {
         if (text == null) {
@@ -85,7 +85,7 @@ final class JdbcValues {
             return "";
         }
         if (text.isEmpty()) {
-            return isCharacter(sqlType) ? "" : null;
+            return "";
         }
 
         String value = text.trim();
@@ -319,14 +319,6 @@ final class JdbcValues {
         } catch (DateTimeParseException e) {
             return null;
         }
-    }
-
-    private static boolean isCharacter(int sqlType) {
-        return switch (sqlType) {
-            case Types.CHAR, Types.VARCHAR, Types.LONGVARCHAR,
-                    Types.NCHAR, Types.NVARCHAR, Types.CLOB, Types.NCLOB -> true;
-            default -> false;
-        };
     }
 
     private static String typeName(int sqlType) {
