@@ -9,6 +9,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.StringJoiner;
 
@@ -17,11 +18,15 @@ import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.custom.TableEditor;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.FileDialog;
 import org.eclipse.swt.widgets.Label;
@@ -31,6 +36,7 @@ import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Text;
 
 /**
  * A query editor and its result table. The widgets live in one control that can be reparented
@@ -52,14 +58,30 @@ final class QueryTab {
     private MenuItem copyRowItem;
     private MenuItem copyAllItem;
     private MenuItem exportCsvItem;
+    private MenuItem openForeignKeyItem;
     private MenuItem deleteRowItem;
+
+    private ForeignKeyLookup foreignKeyLookup = new ForeignKeyLookup(List.of(), false, false);
+
+    private Button cancelChangesButton;
+    private Button saveChangesButton;
+    private Label editHint;
+
+    private TableEditor cellEditor;
+    private Text cellText;
+    private int editRow = -1;
+    private int editColumn = -1;
+    private boolean closingCellEditor;
+    private TableEditModel editModel;
 
     private List<String> columns = List.of();
     private List<String[]> rows = List.of();
     private List<Object[]> rawRows = List.of();
     private QueryResult currentResult;
+    private String lastSql = "";
     private boolean truncated;
     private long elapsedMillis;
+    private int selectedRow = -1;
     private int selectedColumn;
     private int sortColumn = -1;
     private boolean sortAscending = true;
@@ -194,22 +216,22 @@ final class QueryTab {
     /** Runs the query away from the UI thread so it can be stopped while in progress. */
     private void runInBackground(String sql, QueryCancel cancel) {
         try {
-            scheduleFinish(owner.database().execute(sql, cancel), null, cancel);
+            scheduleFinish(sql, owner.database().execute(sql, cancel), null, cancel);
         } catch (SQLException e) {
-            scheduleFinish(null, e, cancel);
+            scheduleFinish(sql, null, e, cancel);
         } catch (RuntimeException e) {
-            scheduleFinish(null, new SQLException("Unexpected error: " + e.getMessage(), e), cancel);
+            scheduleFinish(sql, null, new SQLException("Unexpected error: " + e.getMessage(), e), cancel);
         }
     }
 
-    private void scheduleFinish(QueryResult result, SQLException failure, QueryCancel cancel) {
+    private void scheduleFinish(String sql, QueryResult result, SQLException failure, QueryCancel cancel) {
         if (!owner.display().isDisposed()) {
-            owner.display().asyncExec(() -> finishQuery(result, failure, cancel));
+            owner.display().asyncExec(() -> finishQuery(sql, result, failure, cancel));
         }
     }
 
     /** Applies a finished query on the UI thread and then releases the running-query state. */
-    private void finishQuery(QueryResult result, SQLException failure, QueryCancel cancel) {
+    private void finishQuery(String sql, QueryResult result, SQLException failure, QueryCancel cancel) {
         try {
             if (resultTable.isDisposed()) {
                 return;
@@ -220,6 +242,7 @@ final class QueryTab {
                 owner.reportError("Query failed", failure);
                 owner.setStatus("Query failed: " + DbViewer.messageOf(failure), true);
             } else {
+                lastSql = sql;
                 showResult(result);
                 owner.setStatus("Query executed in " + result.elapsedMillis() + " ms.", false);
             }
@@ -249,6 +272,9 @@ final class QueryTab {
                     runCurrent();
                 }
                 e.doit = false;
+            } else if ((e.stateMask & runModifier) != 0 && e.keyCode == 'a') {
+                text.selectAll();
+                e.doit = false;
             }
         });
         return text;
@@ -256,16 +282,31 @@ final class QueryTab {
 
     private void createResultToolbar(Composite parent) {
         Composite toolbar = new Composite(parent, SWT.NONE);
-        toolbar.setLayout(new GridLayout(2, false));
+        toolbar.setLayout(new GridLayout(5, false));
         toolbar.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
         Label header = new Label(toolbar, SWT.NONE);
         header.setText("Results");
-        header.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        header.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+
+        editHint = new Label(toolbar, SWT.NONE);
+        editHint.setForeground(owner.display().getSystemColor(SWT.COLOR_DARK_GRAY));
+        editHint.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+        cancelChangesButton = new Button(toolbar, SWT.PUSH);
+        cancelChangesButton.setText("Cancel Changes");
+        cancelChangesButton.setLayoutData(new GridData(SWT.RIGHT, SWT.CENTER, false, false));
+        cancelChangesButton.addListener(SWT.Selection, e -> cancelChanges());
+
+        saveChangesButton = new Button(toolbar, SWT.PUSH);
+        saveChangesButton.setText("Save Changes");
+        saveChangesButton.setLayoutData(new GridData(SWT.RIGHT, SWT.CENTER, false, false));
+        saveChangesButton.addListener(SWT.Selection, e -> saveChanges());
 
         resultInfo = new Label(toolbar, SWT.NONE);
         resultInfo.setText("No results");
         resultInfo.setLayoutData(new GridData(SWT.RIGHT, SWT.CENTER, false, false));
+        updateEditControls();
     }
 
     private Table createResultTable(Composite parent) {
@@ -275,20 +316,52 @@ final class QueryTab {
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
         table.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
-        table.addListener(SWT.SetData, e -> {
-            TableItem rowItem = (TableItem) e.item;
-            int index = table.indexOf(rowItem);
-            if (index < 0 || index >= rows.size()) {
+        table.addListener(SWT.SetData, e -> fillResultItem((TableItem) e.item));
+        table.addListener(SWT.MouseDown, e -> {
+            if (e.button == 3) {
+                TableItem item = table.getItem(new Point(e.x, e.y));
+                selectedRow = item == null ? -1 : table.indexOf(item);
+                selectedColumn = columnAt(e.x);
+                commitCellEdit();
                 return;
             }
-            String[] row = rows.get(index);
-            int count = Math.min(row.length, table.getColumnCount());
-            for (int i = 0; i < count; i++) {
-                rowItem.setText(i, row[i]);
+            if (e.button != 1) {
+                return;
+            }
+            TableItem item = table.getItem(new Point(e.x, e.y));
+            if (item == null) {
+                return;
+            }
+            selectedRow = table.indexOf(item);
+            selectedColumn = columnAt(e.x);
+            if (editModel == null
+                    || (e.stateMask & (SWT.CTRL | SWT.SHIFT | SWT.ALT | SWT.COMMAND)) != 0) {
+                return;
+            }
+            if (selectedRow > editModel.rowCount()) {
+                return;
+            }
+            int row = selectedRow;
+            int column = selectedColumn;
+            // Let SWT finish its own selection handling before the editor takes focus.
+            owner.display().asyncExec(() -> {
+                if (!table.isDisposed() && editModel != null) {
+                    beginCellEdit(row, column);
+                }
+            });
+        });
+        table.addListener(SWT.KeyDown, e -> {
+            if (editModel == null) {
+                return;
+            }
+            if (e.keyCode == SWT.F2 || e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR) {
+                int row = table.getSelectionIndex();
+                if (row >= 0) {
+                    beginCellEdit(row, selectedColumn);
+                }
+                e.doit = false;
             }
         });
-        // Remember which field was clicked so "Copy Field" can copy that cell.
-        table.addListener(SWT.MouseDown, e -> selectedColumn = columnAt(e.x));
         table.addListener(SWT.KeyDown, e -> {
             if ((e.stateMask & SWT.MOD1) != 0 && (e.keyCode == 'c' || e.keyCode == 'C')) {
                 copySelectionAsCsv();
@@ -296,6 +369,301 @@ final class QueryTab {
             }
         });
         return table;
+    }
+
+    /** Fills one virtual table item from the committed rows or the pending edits. */
+    private void fillResultItem(TableItem rowItem) {
+        int index = resultTable.indexOf(rowItem);
+        if (index < 0) {
+            return;
+        }
+        Color background = resultTable.getBackground();
+        Color foreground = resultTable.getForeground();
+        int dataRows = dataRowCount();
+
+        if (editModel != null && index == dataRows) {
+            for (int i = 0; i < resultTable.getColumnCount(); i++) {
+                rowItem.setBackground(i, background);
+                rowItem.setForeground(i, i == 0
+                        ? owner.display().getSystemColor(SWT.COLOR_DARK_GRAY) : foreground);
+                rowItem.setText(i, i == 0 ? "(new row)" : "");
+            }
+            return;
+        }
+        if (index >= dataRows) {
+            return;
+        }
+
+        for (int i = 0; i < resultTable.getColumnCount(); i++) {
+            String text;
+            boolean edited = false;
+            if (editModel != null) {
+                text = editModel.displayText(index, i);
+                edited = editModel.isCellEdited(index, i);
+            } else {
+                String[] row = rows.get(index);
+                text = i < row.length && row[i] != null ? row[i] : "";
+            }
+            rowItem.setText(i, text);
+            rowItem.setForeground(i, foreground);
+            rowItem.setBackground(i, edited
+                    ? owner.display().getSystemColor(SWT.COLOR_INFO_BACKGROUND) : background);
+        }
+    }
+
+    private int dataRowCount() {
+        return editModel == null ? rows.size() : editModel.rowCount();
+    }
+
+    /** Redraws all rows, including the extra "new row" slot when the result is editable. */
+    private void refreshResultTable() {
+        closeCellEditor();
+        int count = dataRowCount() + (editModel == null ? 0 : 1);
+        resultTable.setItemCount(count);
+        resultTable.clearAll();
+        resultTable.redraw();
+        updateResultInfo();
+        updateEditControls();
+    }
+
+    private void updateEditControls() {
+        if (cancelChangesButton == null || cancelChangesButton.isDisposed()) {
+            return;
+        }
+        boolean dirty = editModel != null && editModel.isDirty();
+        cancelChangesButton.setEnabled(dirty);
+        saveChangesButton.setEnabled(dirty);
+        editHint.setText(editHintText());
+    }
+
+    private String editHintText() {
+        if (editModel != null) {
+            return editModel.isDirty()
+                    ? "Unsaved changes. Click a cell to keep editing, or the last row to add one."
+                    : "Click a cell to edit; click the last row to add one.";
+        }
+        if (rows.isEmpty() || currentResult == null) {
+            return "";
+        }
+        QueryResult.SourceTable source = currentResult.sourceTable();
+        if (source == null) {
+            return "Read-only: the result does not come from a single table.";
+        }
+        if (source.keyColumns().isEmpty()) {
+            return "Read-only: this table has no primary key.";
+        }
+        return "Read-only: include the primary key column(s) in the query to edit.";
+    }
+
+    /** Opens an inline text editor over one cell. */
+    private void beginCellEdit(int row, int column) {
+        if (editModel == null || resultTable.isDisposed()) {
+            return;
+        }
+        if (row < 0 || row > editModel.rowCount()
+                || column < 0 || column >= resultTable.getColumnCount()) {
+            return;
+        }
+        if (!editModel.isColumnEditable(column)) {
+            owner.setStatus("Column " + columns.get(column)
+                    + " is not a plain table column and cannot be edited.", true);
+            return;
+        }
+        closeCellEditor();
+
+        TableItem item = resultTable.getItem(row);
+        if (item == null) {
+            return;
+        }
+        editRow = row;
+        editColumn = column;
+        cellEditor = new TableEditor(resultTable);
+        cellEditor.horizontalAlignment = SWT.LEFT;
+        cellEditor.grabHorizontal = true;
+        cellEditor.minimumWidth = Math.max(30, resultTable.getColumn(column).getWidth());
+
+        cellText = new Text(resultTable, SWT.NONE);
+        cellText.setFont(resultTable.getFont());
+        cellText.setText(row == editModel.rowCount() ? "" : editModel.displayText(row, column));
+        cellText.selectAll();
+        cellText.addListener(SWT.FocusOut, e -> {
+            if (!closingCellEditor) {
+                commitCellEdit();
+            }
+        });
+        cellText.addListener(SWT.Traverse, e -> {
+            if (e.detail == SWT.TRAVERSE_ESCAPE) {
+                cancelCellEdit();
+                e.doit = false;
+            } else if (e.detail == SWT.TRAVERSE_RETURN) {
+                commitCellEdit();
+                e.doit = false;
+            }
+        });
+        cellText.addListener(SWT.KeyDown, e -> {
+            if (e.keyCode == SWT.ESC) {
+                cancelCellEdit();
+                e.doit = false;
+            } else if (e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR) {
+                commitCellEdit();
+                e.doit = false;
+            }
+        });
+        cellEditor.setEditor(cellText, item, column);
+        cellText.setFocus();
+    }
+
+    /** Stores the text in the open cell editor and closes it. */
+    private void commitCellEdit() {
+        if (closingCellEditor || cellText == null || cellText.isDisposed()) {
+            return;
+        }
+        String text = cellText.getText();
+        int row = editRow;
+        int column = editColumn;
+        closingCellEditor = true;
+        try {
+            if (cellEditor != null) {
+                cellEditor.dispose();
+            }
+            cellText.dispose();
+        } finally {
+            cellEditor = null;
+            cellText = null;
+            editRow = -1;
+            editColumn = -1;
+            closingCellEditor = false;
+        }
+        if (editModel != null) {
+            try {
+                editModel.setCell(row, column, text);
+            } catch (IllegalArgumentException e) {
+                owner.setStatus(e.getMessage(), true);
+            }
+        }
+        refreshResultTable();
+    }
+
+    /** Discards the value being typed in the open cell editor. */
+    private void cancelCellEdit() {
+        closingCellEditor = true;
+        try {
+            if (cellEditor != null) {
+                cellEditor.dispose();
+            }
+            if (cellText != null) {
+                cellText.dispose();
+            }
+        } finally {
+            cellEditor = null;
+            cellText = null;
+            editRow = -1;
+            editColumn = -1;
+            closingCellEditor = false;
+        }
+        resultTable.setFocus();
+    }
+
+    /** Closes the open editor, keeping whatever was typed (used before other actions). */
+    private void closeCellEditor() {
+        if (!closingCellEditor && cellText != null && !cellText.isDisposed()) {
+            commitCellEdit();
+        }
+    }
+
+    private void rebuildEditModel() {
+        editModel = TableEditModel.create(
+                currentResult == null ? null : currentResult.sourceTable(), columns, rawRows);
+    }
+
+    private void cancelChanges() {
+        if (editModel == null || !editModel.isDirty()) {
+            return;
+        }
+        cancelCellEdit();
+        if (!owner.confirm("Cancel Changes", "Discard the unsaved changes?",
+                "The database will not be modified.")) {
+            return;
+        }
+        rebuildEditModel();
+        refreshResultTable();
+        owner.setStatus("Changes discarded.", false);
+    }
+
+    private void saveChanges() {
+        if (editModel == null || !editModel.isDirty()) {
+            return;
+        }
+        closeCellEditor();
+        if (!editModel.isDirty()) {
+            refreshResultTable();
+            return;
+        }
+
+        ConnectionProfile profile = owner.database().profile();
+        String dbType = profile == null ? "" : profile.dbType();
+        TableEditModel.Changes changes;
+        try {
+            changes = editModel.changes(dbType);
+        } catch (IllegalArgumentException e) {
+            owner.showInfo(e.getMessage());
+            owner.setStatus(e.getMessage(), true);
+            return;
+        }
+        if (changes.isEmpty()) {
+            refreshResultTable();
+            return;
+        }
+        if (!new SaveChangesDialog(owner.shell(), owner.monoFont()).open(changes.summary())) {
+            return;
+        }
+
+        try {
+            int affected = owner.database().applyChanges(
+                    editModel.source(), changes.updates(), changes.inserts());
+            owner.setStatus("Saved " + changes.count()
+                    + (changes.count() == 1 ? " changed row" : " changed rows")
+                    + " (" + affected + " affected).", false);
+            reloadAfterSave();
+        } catch (SQLException e) {
+            owner.reportError("Could not save changes", e);
+            owner.setStatus("Could not save changes: " + DbViewer.messageOf(e), true);
+        }
+    }
+
+    /** Refreshes a single SELECT after saving; otherwise adopts the saved values locally. */
+    private void reloadAfterSave() {
+        if (isSingleSelect(lastSql)) {
+            try {
+                showResult(owner.database().execute(lastSql));
+                return;
+            } catch (SQLException e) {
+                owner.reportError("Changes were saved, but the result could not be refreshed", e);
+            }
+        }
+
+        List<Object[]> saved = editModel.committedRows();
+        List<String[]> formatted = new ArrayList<>(saved.size());
+        for (Object[] raw : saved) {
+            String[] texts = new String[columns.size()];
+            for (int i = 0; i < texts.length; i++) {
+                texts[i] = CellFormatter.format(i < raw.length ? raw[i] : null);
+            }
+            formatted.add(texts);
+        }
+        rows = List.copyOf(formatted);
+        rawRows = List.copyOf(saved);
+        rebuildEditModel();
+        refreshResultTable();
+    }
+
+    private static boolean isSingleSelect(String sql) {
+        List<String> statements = SqlSplitter.split(sql);
+        if (statements.size() != 1) {
+            return false;
+        }
+        String statement = statements.get(0).stripLeading().toLowerCase(Locale.ROOT);
+        return statement.startsWith("select") || statement.startsWith("with");
     }
 
     private void createColumn(String name) {
@@ -309,6 +677,11 @@ final class QueryTab {
     /** Sorts result rows by one column, toggling between ascending and descending. */
     private void sortBy(int column) {
         if (column < 0 || column >= columns.size()) {
+            return;
+        }
+        closeCellEditor();
+        if (editModel != null && editModel.isDirty()) {
+            owner.setStatus("Save or cancel the pending changes before sorting.", true);
             return;
         }
         if (sortColumn == column) {
@@ -340,8 +713,8 @@ final class QueryTab {
 
         updateColumnHeaders();
         resultTable.deselectAll();
-        resultTable.clearAll();
-        resultTable.redraw();
+        rebuildEditModel();
+        refreshResultTable();
         owner.setStatus("Sorted by " + columns.get(column)
                 + (sortAscending ? " (ascending)." : " (descending)."), false);
     }
@@ -385,6 +758,8 @@ final class QueryTab {
         copyAllItem = contextAction(menu, "Copy All Rows", () -> copyRows(true));
         exportCsvItem = contextAction(menu, "Export Results as CSV...", this::exportCsv);
         new MenuItem(menu, SWT.SEPARATOR);
+        openForeignKeyItem = contextAction(menu, "Open Referenced Rows...", this::openForeignKey);
+        new MenuItem(menu, SWT.SEPARATOR);
         deleteRowItem = contextAction(menu, "Delete Row(s)", this::deleteRows);
         menu.addListener(SWT.Show, e -> updateContextMenu());
     }
@@ -398,11 +773,45 @@ final class QueryTab {
 
     private void updateContextMenu() {
         int[] selection = resultTable.getSelectionIndices();
-        copyFieldItem.setEnabled(selection.length > 0 && selectedColumn < columns.size());
-        copyRowItem.setEnabled(selection.length > 0);
-        copyAllItem.setEnabled(!rows.isEmpty());
+        boolean pendingEdits = editModel != null && editModel.isDirty();
+        boolean existingRow = false;
+        boolean anyRow = false;
+        for (int row : selection) {
+            if (row >= 0 && row < dataRowCount()) {
+                anyRow = true;
+            }
+            if (row >= 0 && row < rows.size()) {
+                existingRow = true;
+            }
+        }
+        copyFieldItem.setEnabled(anyRow && selectedColumn < columns.size());
+        copyRowItem.setEnabled(anyRow);
+        copyAllItem.setEnabled(dataRowCount() > 0);
         exportCsvItem.setEnabled(hasResults());
-        deleteRowItem.setEnabled(selection.length > 0);
+        deleteRowItem.setEnabled(existingRow && !pendingEdits);
+
+        QueryResult.SourceTable source = currentResult == null ? null : currentResult.sourceTable();
+        String column = source != null && selectedColumn >= 0
+                && selectedColumn < source.columnNames().size()
+                        ? source.columnNames().get(selectedColumn) : "";
+        foreignKeyLookup = owner.foreignKeyLookup(source, column);
+        openForeignKeyItem.setEnabled(source != null && !column.isBlank()
+                && selectedRow >= 0 && selectedRow < rows.size() && selectedRow < rawRows.size()
+                && selectedColumn >= 0 && selectedColumn < rawRows.get(selectedRow).length
+                && rawRows.get(selectedRow)[selectedColumn] != null
+                && !foreignKeyLookup.options().isEmpty());
+    }
+
+    /** Follows the selected foreign-key value into the referenced table in a new tab. */
+    private void openForeignKey() {
+        closeCellEditor();
+        QueryResult.SourceTable source = currentResult == null ? null : currentResult.sourceTable();
+        if (source == null || selectedRow < 0 || selectedRow >= rawRows.size()
+                || selectedColumn < 0 || selectedColumn >= source.columnNames().size()) {
+            return;
+        }
+        String column = source.columnNames().get(selectedColumn);
+        owner.openForeignKeyRows(source, column, rawRows.get(selectedRow), foreignKeyLookup);
     }
 
     private void copyField() {
@@ -416,11 +825,17 @@ final class QueryTab {
 
     private void copyRows(boolean all) {
         int[] selection = all ? allRowIndices() : resultTable.getSelectionIndices();
-        if (selection.length == 0) {
+        List<Integer> chosen = new ArrayList<>();
+        for (int row : selection) {
+            if (row >= 0 && row < dataRowCount()) {
+                chosen.add(row);
+            }
+        }
+        if (chosen.isEmpty()) {
             return;
         }
         StringBuilder text = new StringBuilder();
-        for (int row : selection) {
+        for (int row : chosen) {
             StringJoiner fields = new StringJoiner("\t");
             for (int column = 0; column < columns.size(); column++) {
                 fields.add(cell(row, column));
@@ -431,7 +846,7 @@ final class QueryTab {
             text.append(fields);
         }
         copyToClipboard(text.toString());
-        owner.setStatus(selection.length + (selection.length == 1 ? " row" : " rows")
+        owner.setStatus(chosen.size() + (chosen.size() == 1 ? " row" : " rows")
                 + " copied to clipboard.", false);
     }
 
@@ -511,7 +926,7 @@ final class QueryTab {
     }
 
     private int[] allRowIndices() {
-        int[] indices = new int[rows.size()];
+        int[] indices = new int[dataRowCount()];
         for (int i = 0; i < indices.length; i++) {
             indices[i] = i;
         }
@@ -519,6 +934,9 @@ final class QueryTab {
     }
 
     private String cell(int row, int column) {
+        if (editModel != null && row >= 0 && row < editModel.rowCount()) {
+            return editModel.displayText(row, column);
+        }
         if (row < 0 || row >= rows.size() || column < 0 || column >= rows.get(row).length) {
             return "";
         }
@@ -541,6 +959,19 @@ final class QueryTab {
         if (selection.length == 0) {
             return;
         }
+        if (editModel != null && editModel.isDirty()) {
+            owner.showInfo("Save or cancel the pending changes before deleting rows.");
+            return;
+        }
+        List<Integer> chosen = new ArrayList<>();
+        for (int row : selection) {
+            if (row >= 0 && row < rows.size()) {
+                chosen.add(row);
+            }
+        }
+        if (chosen.isEmpty()) {
+            return;
+        }
         QueryResult.SourceTable source = currentResult == null ? null : currentResult.sourceTable();
         if (source == null) {
             owner.showInfo("This result set cannot be mapped to a table, so its rows cannot be deleted.");
@@ -551,24 +982,21 @@ final class QueryTab {
         String dbType = profile == null ? "" : profile.dbType();
         String table = new TableInfo(source.catalog(), source.schema(), source.table(), "TABLE")
                 .qualifiedName(dbType);
-        String question = "Delete " + selection.length
-                + (selection.length == 1 ? " row" : " rows") + " from " + table + "?";
+        String question = "Delete " + chosen.size()
+                + (chosen.size() == 1 ? " row" : " rows") + " from " + table + "?";
         if (!owner.confirm(question, "This cannot be undone.")) {
             return;
         }
 
         List<Object[]> values = new ArrayList<>();
-        for (int index : selection) {
+        for (int index : chosen) {
             if (index >= 0 && index < rawRows.size()) {
                 values.add(rawRows.get(index));
             }
         }
         try {
             int deleted = owner.database().deleteRows(source, values);
-            Set<Integer> removed = new HashSet<>();
-            for (int index : selection) {
-                removed.add(index);
-            }
+            Set<Integer> removed = new HashSet<>(chosen);
             List<String[]> remainingRows = new ArrayList<>();
             List<Object[]> remainingRaw = new ArrayList<>();
             for (int i = 0; i < rows.size(); i++) {
@@ -581,9 +1009,9 @@ final class QueryTab {
             }
             rows = List.copyOf(remainingRows);
             rawRows = List.copyOf(remainingRaw);
-            resultTable.setItemCount(rows.size());
             resultTable.deselectAll();
-            updateResultInfo();
+            rebuildEditModel();
+            refreshResultTable();
             owner.setStatus("Deleted " + deleted + (deleted == 1 ? " row" : " rows")
                     + " from " + source.table() + ".", false);
         } catch (SQLException e) {
@@ -605,8 +1033,8 @@ final class QueryTab {
             rows = result.rows();
             rawRows = result.rawRows();
             truncated = result.truncated();
-            resultTable.setItemCount(rows.size());
-            updateResultInfo();
+            rebuildEditModel();
+            refreshResultTable();
         } else {
             int updates = result.totalUpdates();
             String info = result.statementCount()
@@ -620,7 +1048,11 @@ final class QueryTab {
     }
 
     private void updateResultInfo() {
-        String info = rows.size() + (rows.size() == 1 ? " row" : " rows");
+        int count = dataRowCount();
+        String info = count + (count == 1 ? " row" : " rows");
+        if (editModel != null && editModel.newRowCount() > 0) {
+            info += " (" + editModel.newRowCount() + " new)";
+        }
         if (truncated) {
             info += " (first " + DatabaseService.MAX_ROWS + " shown)";
         }
@@ -628,6 +1060,7 @@ final class QueryTab {
     }
 
     private void clearResultTable() {
+        cancelCellEdit();
         for (TableColumn column : resultTable.getColumns()) {
             column.dispose();
         }
@@ -637,12 +1070,16 @@ final class QueryTab {
         rows = List.of();
         rawRows = List.of();
         currentResult = null;
+        editModel = null;
         truncated = false;
         elapsedMillis = 0;
+        selectedRow = -1;
         selectedColumn = 0;
+        foreignKeyLookup = new ForeignKeyLookup(List.of(), false, false);
         sortColumn = -1;
         sortAscending = true;
         resultInfo.setText("No results");
         owner.updateConnectionUi();
+        updateEditControls();
     }
 }

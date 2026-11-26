@@ -13,6 +13,7 @@ import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.VerifyKeyListener;
 import org.eclipse.swt.events.VerifyEvent;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.widgets.Display;
 
 /** SQL colouring and indentation-aware Enter/Tab handling for a {@link StyledText} editor. */
 public final class SqlSyntaxHighlighter implements LineStyleListener, VerifyKeyListener {
@@ -38,18 +39,39 @@ public final class SqlSyntaxHighlighter implements LineStyleListener, VerifyKeyL
     private final Color identifierColor;
     private final Color numberColor;
     private final Color commentColor;
+    private final Color editorBackground;
+    private final Color editorForeground;
 
     /** End-of-line states, so multi-line strings and comments stay coloured correctly. */
     private final List<LexState> endStates = new ArrayList<>();
 
     public SqlSyntaxHighlighter(StyledText editor) {
+        this(editor, isDarkTheme(editor));
+    }
+
+    /** Package-visible so the dark palette can be exercised without a dark system theme. */
+    SqlSyntaxHighlighter(StyledText editor, boolean dark) {
         this.editor = editor;
-        var display = editor.getDisplay();
-        keywordColor = new Color(display, 0, 0, 170);
-        stringColor = new Color(display, 0, 115, 0);
-        identifierColor = new Color(display, 0, 110, 130);
-        numberColor = new Color(display, 150, 0, 150);
-        commentColor = new Color(display, 120, 120, 120);
+        Display display = editor.getDisplay();
+        if (dark) {
+            keywordColor = color(display, 0x82, 0xAA, 0xFF);
+            stringColor = color(display, 0x98, 0xC3, 0x79);
+            identifierColor = color(display, 0x56, 0xB6, 0xC2);
+            numberColor = color(display, 0xD1, 0x9A, 0x66);
+            commentColor = color(display, 0x9A, 0xA0, 0xA6);
+            editorBackground = color(display, 0x1E, 0x1E, 0x1E);
+            editorForeground = color(display, 0xD4, 0xD4, 0xD4);
+            editor.setBackground(editorBackground);
+            editor.setForeground(editorForeground);
+        } else {
+            keywordColor = color(display, 0, 0, 170);
+            stringColor = color(display, 0, 115, 0);
+            identifierColor = color(display, 0, 110, 130);
+            numberColor = color(display, 150, 0, 150);
+            commentColor = color(display, 120, 120, 120);
+            editorBackground = null;
+            editorForeground = null;
+        }
 
         editor.addLineStyleListener(this);
         editor.addVerifyKeyListener(this);
@@ -60,6 +82,26 @@ public final class SqlSyntaxHighlighter implements LineStyleListener, VerifyKeyL
         editor.setTabs(INDENT.length());
     }
 
+    /**
+     * Uses the platform's dark-theme setting, falling back to sampling the editor background
+     * when SWT has not initialised the theme flag.
+     */
+    private static boolean isDarkTheme(StyledText editor) {
+        if (Display.isSystemDarkTheme()) {
+            return true;
+        }
+        Color background = editor.getBackground();
+        if (background == null) {
+            return false;
+        }
+        int brightness = (background.getRed() + background.getGreen() + background.getBlue()) / 3;
+        return brightness < 128;
+    }
+
+    private static Color color(Display display, int red, int green, int blue) {
+        return new Color(display, red, green, blue);
+    }
+
     /** Releases the colours allocated by this highlighter. */
     public void dispose() {
         keywordColor.dispose();
@@ -67,6 +109,12 @@ public final class SqlSyntaxHighlighter implements LineStyleListener, VerifyKeyL
         identifierColor.dispose();
         numberColor.dispose();
         commentColor.dispose();
+        if (editorBackground != null) {
+            editorBackground.dispose();
+        }
+        if (editorForeground != null) {
+            editorForeground.dispose();
+        }
     }
 
     @Override

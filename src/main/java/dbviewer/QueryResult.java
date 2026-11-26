@@ -1,5 +1,7 @@
 package dbviewer;
 
+import java.sql.Types;
+import java.util.ArrayList;
 import java.util.List;
 
 /** The outcome of running one or more SQL statements. */
@@ -13,14 +15,28 @@ public record QueryResult(
         int statementCount,
         SourceTable sourceTable) {
 
-    /** Where the displayed result set came from, used to delete rows from the database. */
+    /** Where the displayed result set came from, used to update/delete rows in the database. */
     public record SourceTable(
             String catalog, String schema, String table,
-            List<String> columnNames, List<String> keyColumns) {
+            List<String> columnNames, List<Integer> columnTypes, List<String> keyColumns) {
 
         public SourceTable {
             columnNames = List.copyOf(columnNames);
+            columnTypes = List.copyOf(columnTypes);
             keyColumns = List.copyOf(keyColumns);
+            if (columnTypes.size() < columnNames.size()) {
+                List<Integer> padded = new ArrayList<>(columnTypes);
+                while (padded.size() < columnNames.size()) {
+                    padded.add(Types.OTHER);
+                }
+                columnTypes = List.copyOf(padded);
+            }
+        }
+
+        /** Constructor for callers that do not know the JDBC column types. */
+        public SourceTable(String catalog, String schema, String table,
+                List<String> columnNames, List<String> keyColumns) {
+            this(catalog, schema, table, columnNames, List.of(), keyColumns);
         }
     }
 

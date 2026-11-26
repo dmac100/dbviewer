@@ -18,12 +18,20 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   a folder body near an edge splits the main panel horizontally or vertically. Tabs can also
   be dragged between panes; the editor text, cursor position and results follow the tab.
   **Ctrl+Enter** runs the statement under the cursor; **Ctrl+Shift+Enter** (or F5 / *Run Query*)
-  runs every statement in the editor.
+  runs every statement in the editor; **Ctrl+A** selects the whole query. The SQL colours adapt to
+  the system's dark theme with bright keywords, strings and numbers.
 - **Bottom pane** — a virtualized results table in each tab, with column headers that sort the
   rows ascending/descending using natural ordering (`item2` before `item10`), and a context menu
-  to copy a field, copy rows (tab-separated), or delete rows from the database after a confirmation.
+  to copy a field, copy rows (tab-separated), follow a foreign-key value to the matching rows in a
+  new query tab, or delete rows from the database after a confirmation.
   **Ctrl+C** copies the selected rows as CSV; *Query → Export Results as CSV...* saves all rows
   with a header line. Shows row count and execution time; update statements show the affected-row count.
+- **Editable results** — when a query returns a single table and includes its primary key column(s),
+  click any cell to edit it (Enter/F2 also works). Type in the blank **`(new row)`** line under the
+  results to add rows. Changed cells are highlighted; **Cancel Changes** discards them and
+  **Save Changes** shows a summary of the updates and inserts before writing them to the database
+  in one transaction. Results from joins, views without keys and queries that omit the primary key
+  stay read-only.
 - JDBC drivers bundled for **SQLite**, **MySQL**, and **PostgreSQL**. Any other JDBC driver
   can be used by choosing *Generic JDBC* and adding its jar to the classpath/dependencies.
 - Optional **SSH tunnel**: enable it in the connection dialog to reach a remote database through
@@ -70,7 +78,9 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
 4. Type or edit SQL in the active tab: **Ctrl+Enter** runs the statement at the cursor,
    **Ctrl+Shift+Enter** runs the whole script. Results appear below the editor in that tab.
    Use **Ctrl+T** for another query tab, drag tabs by their tab strips to reorder or split
-   the main panel, and right-click the results for copy/export/delete actions.
+   the main panel, and right-click the results for copy/export/delete actions. When the result is
+   editable, click a cell to change it or the `(new row)` line to add one, then use **Cancel Changes**
+   or **Save Changes** in the results toolbar.
 
 ## Notes
 
@@ -81,6 +91,14 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
 - **Delete Row(s)** asks for confirmation, then issues a `DELETE` for the selected rows. Tables
   with a primary key are matched by that key; otherwise all columns in the result are used. If a
   query omits the primary key column, deletion is refused.
+- Editable cells use the values exactly as typed. Type `<NULL>` for SQL NULL; in a new row, leave a
+  cell empty to let the database supply its default (for example an auto-incrementing key) and use
+  `''` to insert an empty string. After saving, a single-select query is re-run so generated keys
+  appear. Numeric, boolean, date and time values are converted using the column's JDBC type.
+- **Open Referenced Rows** appears when a result cell can be followed to another table's primary
+  key. Declared foreign keys are used when the database exposes them; otherwise compatible tables
+  are offered as a list, with a *Remember this table for the session* checkbox. The generated
+  `SELECT` runs in a new tab. Session choices are cleared when the connection changes.
 - Status bar messages are shortened to fit the window; hover over them for the full text.
 - Queries run on a background thread with a wait cursor, so the window stays responsive.
   Click **Stop Query** (toolbar or *Query* menu) to cancel the running statement; only one

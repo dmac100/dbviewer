@@ -8,10 +8,14 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
@@ -154,6 +158,222 @@ public final class DatabaseService {
         return expected.equalsIgnoreCase(actual);
     }
 
+    /**
+     * Returns the foreign keys declared on a table, grouped by constraint. Each reference lists
+     * source columns and the columns they point at, in key sequence order.
+     */
+    public List<ForeignKeyReference> importedKeys(TableInfo table) throws SQLException {
+        requireConnection();
+        Map<String, List<KeyPart>> grouped = new LinkedHashMap<>();
+        try (ResultSet rs = connection.getMetaData().getImportedKeys(
+                nullable(table.catalog()), nullable(table.schema()), table.name())) {
+            while (rs.next()) {
+                String sourceTable = rs.getString("FKTABLE_NAME");
+                if (!sameIdentifier(table.name(), sourceTable)
+                        || (!table.catalog().isBlank()
+                                && !sameIdentifier(table.catalog(), rs.getString("FKTABLE_CAT")))
+                        || (!table.schema().isBlank()
+                                && !sameIdentifier(table.schema(), rs.getString("FKTABLE_SCHEM")))) {
+                    continue;
+                }
+                TableInfo target = new TableInfo(rs.getString("PKTABLE_CAT"),
+                        rs.getString("PKTABLE_SCHEM"), rs.getString("PKTABLE_NAME"), "TABLE");
+                if (target.name().isBlank()) {
+                    continue;
+                }
+                String constraint = rs.getString("FK_NAME");
+                String group = (constraint == null ? "" : constraint) + '\u0000'
+                        + target.catalog() + '\u0000' + target.schema() + '\u0000' + target.name();
+                grouped.computeIfAbsent(group, key -> new ArrayList<>()).add(new KeyPart(
+                        rs.getShort("KEY_SEQ"), rs.getString("FKCOLUMN_NAME"), target,
+                        rs.getString("PKCOLUMN_NAME")));
+            }
+        }
+
+        List<ForeignKeyReference> references = new ArrayList<>();
+        for (Map.Entry<String, List<KeyPart>> entry : grouped.entrySet()) {
+            List<KeyPart> parts = entry.getValue();
+            parts.sort(Comparator.comparingInt(KeyPart::sequence));
+            List<String> foreignColumns = new ArrayList<>();
+            List<String> referencedColumns = new ArrayList<>();
+            for (KeyPart part : parts) {
+                if (part.column() != null && !part.column().isBlank()
+                        && part.referencedColumn() != null && !part.referencedColumn().isBlank()) {
+                    foreignColumns.add(part.column());
+                    referencedColumns.add(part.referencedColumn());
+                }
+            }
+            if (!foreignColumns.isEmpty()) {
+                String name = entry.getKey().substring(0, entry.getKey().indexOf('\u0000'));
+                references.add(new ForeignKeyReference(name, parts.get(0).target(),
+                        foreignColumns, referencedColumns));
+            }
+        }
+        return references;
+    }
+
+    private record KeyPart(short sequence, String column, TableInfo target, String referencedColumn) {
+    }
+
+    /**
+     * Guesses targets when the database has no declared constraint: tables with a primary key
+     * column whose name matches the column, e.g. {@code owner_id} to {@code owners(id)}.
+     */
+    public List<ForeignKeyReference> candidateReferences(TableInfo source, String column)
+            throws SQLException {
+        requireConnection();
+        if (column == null || column.isBlank()) {
+            return List.of();
+        }
+        Map<String, ForeignKeyReference> found = new LinkedHashMap<>();
+        for (String candidate : candidateColumnNames(column)) {
+            int before = found.size();
+            try (ResultSet rs = connection.getMetaData().getColumns(
+                    nullable(source.catalog()), nullable(source.schema()), "%", candidate)) {
+                while (rs.next()) {
+                    String name = rs.getString("TABLE_NAME");
+                    String columnName = rs.getString("COLUMN_NAME");
+                    if (name == null || name.isBlank() || !sameIdentifier(candidate, columnName)
+                            || sameIdentifier(source.name(), name)) {
+                        continue;
+                    }
+                    String catalog = rs.getString("TABLE_CAT");
+                    String schema = rs.getString("TABLE_SCHEM");
+                    if (!source.catalog().isBlank() && !sameIdentifier(source.catalog(), catalog)) {
+                        continue;
+                    }
+                    if (!source.schema().isBlank() && !sameIdentifier(source.schema(), schema)) {
+                        continue;
+                    }
+                    List<String> keys = primaryKeys(catalog, schema, name);
+                    String key = keys.stream()
+                            .filter(k -> sameIdentifier(k, columnName))
+                            .findFirst().orElse(null);
+                    if (key == null) {
+                        continue;
+                    }
+                    TableInfo target = new TableInfo(catalog, schema, name, "TABLE");
+                    found.putIfAbsent(targetKey(target), new ForeignKeyReference("",
+                            target, List.of(column), List.of(key)));
+                }
+            }
+            // A nearer match (team_id) makes generic ones (id) unnecessary noise.
+            if (found.size() > before) {
+                break;
+            }
+        }
+        List<ForeignKeyReference> references = new ArrayList<>(found.values());
+        references.sort(Comparator
+                .comparingInt((ForeignKeyReference ref) -> nameRelevance(ref.referencedTable().name(), column))
+                .thenComparing(ref -> ref.referencedTable().name(), String.CASE_INSENSITIVE_ORDER));
+        return references;
+    }
+
+    private static List<String> candidateColumnNames(String column) {
+        Set<String> names = new LinkedHashSet<>();
+        names.add(column);
+        String base = baseName(column);
+        if (!base.isEmpty() && !base.equalsIgnoreCase(column)) {
+            names.add(base);
+            names.add(base + "_id");
+        }
+        String lower = column.toLowerCase(Locale.ROOT);
+        if (lower.endsWith("_id") || lower.endsWith("id")) {
+            names.add("id");
+        }
+        return new ArrayList<>(names);
+    }
+
+    private static String baseName(String column) {
+        String lower = column.toLowerCase(Locale.ROOT);
+        if (lower.endsWith("_id")) {
+            return lower.substring(0, lower.length() - 3);
+        }
+        if (lower.endsWith("id") && lower.length() > 2) {
+            return lower.substring(0, lower.length() - 2);
+        }
+        return lower;
+    }
+
+    private static int nameRelevance(String tableName, String column) {
+        String base = baseName(column);
+        String name = tableName.toLowerCase(Locale.ROOT);
+        if (!base.isEmpty() && name.equals(base)) {
+            return 0;
+        }
+        if (!base.isEmpty() && (name.equals(base + "s") || name.equals(base + "ies"))) {
+            return 1;
+        }
+        return 2;
+    }
+
+    private static String targetKey(TableInfo table) {
+        return (table.catalog() + '\u0000' + table.schema() + '\u0000' + table.name())
+                .toLowerCase(Locale.ROOT);
+    }
+
+    /** Builds a SELECT for the referenced rows, using the values in one result row. */
+    public String referencedRowsSql(ForeignKeyReference reference, QueryResult.SourceTable source,
+            Object[] row) throws SQLException {
+        requireConnection();
+        if (source == null) {
+            throw new SQLException("This result set cannot be mapped to a table.");
+        }
+        String dbType = profile == null ? "" : profile.dbType();
+        StringBuilder sql = new StringBuilder("SELECT * FROM ")
+                .append(reference.referencedTable().qualifiedName(dbType)).append(" WHERE ");
+        for (int i = 0; i < reference.foreignColumns().size(); i++) {
+            if (i > 0) {
+                sql.append(" AND ");
+            }
+            String foreign = reference.foreignColumns().get(i);
+            int index = columnIndex(source.columnNames(), foreign);
+            if (index < 0) {
+                throw new SQLException("The query must include the foreign key column(s): "
+                        + String.join(", ", reference.foreignColumns()));
+            }
+            Object value = row != null && index < row.length ? row[index] : null;
+            sql.append(TableInfo.quoteIdentifier(reference.referencedColumns().get(i), dbType));
+            if (value == null) {
+                sql.append(" IS NULL");
+            } else {
+                sql.append(" = ").append(sqlLiteral(value, dbType));
+            }
+        }
+        return sql.toString();
+    }
+
+    /** Returns a SQL literal for a value read from a result set. */
+    public static String sqlLiteral(Object value) {
+        return sqlLiteral(value, "");
+    }
+
+    private static String sqlLiteral(Object value, String dbType) {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof Number || value instanceof Boolean) {
+            return value.toString();
+        }
+        if (value instanceof byte[] bytes) {
+            StringBuilder hex = new StringBuilder("X'");
+            for (byte b : bytes) {
+                hex.append(Character.forDigit((b >> 4) & 0xf, 16))
+                        .append(Character.forDigit(b & 0xf, 16));
+            }
+            return hex.append('\'').toString();
+        }
+        String text = value.toString();
+        if ("mysql".equalsIgnoreCase(dbType)) {
+            text = text.replace("\\", "\\\\");
+        }
+        return "'" + text.replace("'", "''") + "'";
+    }
+
+    private static String nullable(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
     /** Executes a SQL script. If it produces result sets, the last one is returned. */
     public QueryResult execute(String script) throws SQLException {
         return execute(script, null);
@@ -273,17 +493,177 @@ public final class DatabaseService {
         return deleted;
     }
 
+    /** One existing row to update, matched by its original primary key values. */
+    public record RowUpdate(List<String> keyColumns, List<Object> keyValues,
+            Map<String, Object> values) {
+
+        public RowUpdate {
+            keyColumns = List.copyOf(keyColumns);
+            keyValues = Collections.unmodifiableList(new ArrayList<>(keyValues));
+            values = Collections.unmodifiableMap(new LinkedHashMap<>(values));
+        }
+    }
+
+    /** One new row to insert. Columns with no value are left to the database default. */
+    public record RowInsert(Map<String, Object> values) {
+
+        public RowInsert {
+            values = Collections.unmodifiableMap(new LinkedHashMap<>(values));
+        }
+    }
+
+    /**
+     * Applies row updates and inserts in a single transaction. Updates and inserts are prepared
+     * from the column metadata of {@code source}, so values are bound with their JDBC types.
+     *
+     * @return the number of rows changed or added
+     */
+    public int applyChanges(QueryResult.SourceTable source, List<RowUpdate> updates,
+            List<RowInsert> inserts) throws SQLException {
+        requireConnection();
+        if (updates.isEmpty() && inserts.isEmpty()) {
+            return 0;
+        }
+        if (source == null || source.table() == null || source.table().isBlank()) {
+            throw new SQLException("This result set cannot be mapped to a table.");
+        }
+
+        String dbType = profile == null ? "" : profile.dbType();
+        String table = new TableInfo(source.catalog(), source.schema(), source.table(), "TABLE")
+                .qualifiedName(dbType);
+        Map<String, Integer> types = columnTypes(source);
+        boolean previousAutoCommit = connection.getAutoCommit();
+        int changed = 0;
+        try {
+            connection.setAutoCommit(false);
+            for (RowUpdate update : updates) {
+                changed += executeUpdate(connection, table, dbType, types, update);
+            }
+            for (RowInsert insert : inserts) {
+                changed += executeInsert(connection, table, dbType, types, insert);
+            }
+            connection.commit();
+            return changed;
+        } catch (SQLException | RuntimeException e) {
+            try {
+                connection.rollback();
+            } catch (SQLException ignored) {
+                // Keep the original failure.
+            }
+            throw e;
+        } finally {
+            try {
+                connection.setAutoCommit(previousAutoCommit);
+            } catch (SQLException ignored) {
+                // The connection is still usable for the next statement.
+            }
+        }
+    }
+
+    private static int executeUpdate(Connection connection, String table, String dbType,
+            Map<String, Integer> types, RowUpdate update) throws SQLException {
+        if (update.values().isEmpty()) {
+            return 0;
+        }
+        StringBuilder sql = new StringBuilder("UPDATE ").append(table).append(" SET ");
+        int index = 0;
+        for (String column : update.values().keySet()) {
+            if (index++ > 0) {
+                sql.append(", ");
+            }
+            sql.append(TableInfo.quoteIdentifier(column, dbType)).append(" = ?");
+        }
+        sql.append(" WHERE ");
+        List<Object> keyValues = update.keyValues();
+        for (int i = 0; i < update.keyColumns().size(); i++) {
+            if (i > 0) {
+                sql.append(" AND ");
+            }
+            sql.append(TableInfo.quoteIdentifier(update.keyColumns().get(i), dbType)).append(" = ?");
+        }
+        try (PreparedStatement statement = connection.prepareStatement(sql.toString())) {
+            int parameter = 1;
+            for (Map.Entry<String, Object> entry : update.values().entrySet()) {
+                bind(statement, parameter++, entry.getValue(), typeOf(types, entry.getKey()));
+            }
+            for (int i = 0; i < update.keyColumns().size(); i++) {
+                Object value = i < keyValues.size() ? keyValues.get(i) : null;
+                bind(statement, parameter++, value, typeOf(types, update.keyColumns().get(i)));
+            }
+            return Math.max(0, statement.executeUpdate());
+        }
+    }
+
+    private static int executeInsert(Connection connection, String table, String dbType,
+            Map<String, Integer> types, RowInsert insert) throws SQLException {
+        if (insert.values().isEmpty()) {
+            return 0;
+        }
+        StringBuilder columns = new StringBuilder();
+        StringBuilder placeholders = new StringBuilder();
+        int index = 0;
+        for (String column : insert.values().keySet()) {
+            if (index++ > 0) {
+                columns.append(", ");
+                placeholders.append(", ");
+            }
+            columns.append(TableInfo.quoteIdentifier(column, dbType));
+            placeholders.append('?');
+        }
+        String sql = "INSERT INTO " + table + " (" + columns + ") VALUES (" + placeholders + ")";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            int parameter = 1;
+            for (Map.Entry<String, Object> entry : insert.values().entrySet()) {
+                bind(statement, parameter++, entry.getValue(), typeOf(types, entry.getKey()));
+            }
+            return Math.max(0, statement.executeUpdate());
+        }
+    }
+
+    private static void bind(PreparedStatement statement, int index, Object value, Integer sqlType)
+            throws SQLException {
+        if (value == null) {
+            statement.setNull(index, sqlType == null ? java.sql.Types.NULL : sqlType);
+        } else if (value instanceof String text) {
+            statement.setString(index, text);
+        } else {
+            statement.setObject(index, value);
+        }
+    }
+
+    private static Map<String, Integer> columnTypes(QueryResult.SourceTable source) {
+        Map<String, Integer> types = new LinkedHashMap<>();
+        for (int i = 0; i < source.columnNames().size(); i++) {
+            String name = source.columnNames().get(i);
+            if (!name.isBlank() && !types.containsKey(name) && i < source.columnTypes().size()) {
+                types.put(name, source.columnTypes().get(i));
+            }
+        }
+        return types;
+    }
+
+    private static Integer typeOf(Map<String, Integer> types, String column) {
+        for (Map.Entry<String, Integer> entry : types.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(column)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
     private QueryResult readResultSet(ResultSet rs, QueryCancel cancel) throws SQLException {
         ResultSetMetaData meta = rs.getMetaData();
         int columnCount = meta.getColumnCount();
 
         List<String> columns = new ArrayList<>(columnCount);
         List<String> columnNames = new ArrayList<>(columnCount);
+        List<Integer> columnTypes = new ArrayList<>(columnCount);
         for (int i = 1; i <= columnCount; i++) {
             String label = meta.getColumnLabel(i);
             columns.add(label == null || label.isBlank() ? "Column " + i : label);
             String name = meta.getColumnName(i);
             columnNames.add(name == null ? "" : name);
+            columnTypes.add(meta.getColumnType(i));
         }
 
         List<String[]> rows = new ArrayList<>();
@@ -308,23 +688,46 @@ public final class DatabaseService {
             rawRows.add(rawRow);
         }
 
-        QueryResult.SourceTable source = null;
-        if (columnCount > 0) {
-            String table = meta.getTableName(1);
-            if (table != null && !table.isBlank()) {
-                String catalog = tablePart(meta.getCatalogName(1), table);
-                String schema = tablePart(meta.getSchemaName(1), table);
-                source = new QueryResult.SourceTable(catalog, schema, table,
-                        columnNames, primaryKeys(catalog, schema, table));
-            }
-        }
-
+        QueryResult.SourceTable source = singleTableSource(meta, columnCount, columnNames, columnTypes);
         return new QueryResult(columns, rows, rawRows, List.of(), 0, truncated, 1, source);
     }
 
     /** SQLite reports the table name as the catalog; ignore such redundant qualifiers. */
     private static String tablePart(String value, String table) {
         return value == null || value.isBlank() || value.equalsIgnoreCase(table) ? "" : value;
+    }
+
+    /**
+     * Returns the table a result set came from, or null when the columns do not all belong to
+     * one table. Editing a result is only safe when it maps back to a single table.
+     */
+    private QueryResult.SourceTable singleTableSource(ResultSetMetaData meta, int columnCount,
+            List<String> columnNames, List<Integer> columnTypes) throws SQLException {
+        String table = "";
+        String catalog = "";
+        String schema = "";
+        for (int i = 1; i <= columnCount; i++) {
+            String name = meta.getTableName(i);
+            if (name == null || name.isBlank()) {
+                continue;
+            }
+            String partCatalog = tablePart(meta.getCatalogName(i), name);
+            String partSchema = tablePart(meta.getSchemaName(i), name);
+            if (table.isEmpty()) {
+                table = name;
+                catalog = partCatalog;
+                schema = partSchema;
+            } else if (!table.equalsIgnoreCase(name)
+                    || !sameIdentifier(catalog, partCatalog)
+                    || !sameIdentifier(schema, partSchema)) {
+                return null;
+            }
+        }
+        if (table.isEmpty()) {
+            return null;
+        }
+        return new QueryResult.SourceTable(catalog, schema, table,
+                columnNames, columnTypes, primaryKeys(catalog, schema, table));
     }
 
     private List<String> primaryKeys(String catalog, String schema, String table) {
