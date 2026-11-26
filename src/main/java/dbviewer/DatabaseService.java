@@ -28,6 +28,7 @@ public final class DatabaseService {
     private Connection connection;
     private ConnectionProfile profile;
     private SshTunnelSession tunnel;
+    private String defaultDatabaseSql;
 
     /** Opens a new connection, replacing the current one only after the new one succeeds. */
     public void connect(ConnectionProfile newProfile) throws SQLException {
@@ -51,6 +52,7 @@ public final class DatabaseService {
         connection = opened;
         profile = newProfile;
         tunnel = openedTunnel;
+        defaultDatabaseSql = null;
     }
 
     /** Opens and immediately closes a connection, used by the "Test Connection" button. */
@@ -81,6 +83,7 @@ public final class DatabaseService {
         }
         connection = null;
         profile = null;
+        defaultDatabaseSql = null;
         if (tunnel != null) {
             tunnel.close();
             tunnel = null;
@@ -93,6 +96,49 @@ public final class DatabaseService {
 
     public ConnectionProfile profile() {
         return profile;
+    }
+
+    /**
+     * Selects a catalog or schema as the default for subsequent queries. A statement is issued now
+     * and repeated before each query, so manually changing the session does not change the default.
+     */
+    public void useDatabase(String scope, boolean schema) throws SQLException {
+        requireConnection();
+        String sql = defaultDatabaseStatement(scope, schema, profile.dbType());
+        try (Statement stmt = connection.createStatement()) {
+            if (sql != null) {
+                stmt.execute(sql);
+            }
+        }
+        defaultDatabaseSql = sql;
+    }
+
+    /** Returns the session statement that selects the default catalog or schema. */
+    static String defaultDatabaseStatement(String scope, boolean schema, String dbType) {
+        if (scope == null || scope.isBlank()) {
+            return null;
+        }
+        if ("sqlite".equalsIgnoreCase(dbType)) {
+            // A SQLite connection has one database; attached databases have no USE statement.
+            return null;
+        }
+        String quoted = TableInfo.quoteIdentifier(scope, dbType);
+        if ("mysql".equalsIgnoreCase(dbType)) {
+            return "USE " + quoted;
+        }
+        if ("postgresql".equalsIgnoreCase(dbType) || schema) {
+            return "SET search_path TO " + quoted;
+        }
+        return "USE " + quoted;
+    }
+
+    private void applyDefaultDatabase() throws SQLException {
+        if (defaultDatabaseSql == null) {
+            return;
+        }
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(defaultDatabaseSql);
+        }
     }
 
     /** Lists tables and views in a stable, case-insensitive order. */
@@ -385,6 +431,7 @@ public final class DatabaseService {
      */
     public QueryResult execute(String script, QueryCancel cancel) throws SQLException {
         requireConnection();
+        applyDefaultDatabase();
         long startedAt = System.nanoTime();
 
         List<String> statements = SqlSplitter.split(script);

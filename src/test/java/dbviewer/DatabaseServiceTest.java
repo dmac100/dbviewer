@@ -234,6 +234,18 @@ class DatabaseServiceTest {
     }
 
     @Test
+    void buildsDefaultDatabaseStatementsForEachDatabaseType() {
+        assertEquals("USE `sales`",
+                DatabaseService.defaultDatabaseStatement("sales", false, "MySQL"));
+        assertEquals("SET search_path TO \"public\"",
+                DatabaseService.defaultDatabaseStatement("public", true, "PostgreSQL"));
+        assertEquals("USE \"sales\"",
+                DatabaseService.defaultDatabaseStatement("sales", false, "Generic JDBC"));
+        assertNull(DatabaseService.defaultDatabaseStatement("main", false, "SQLite"));
+        assertNull(DatabaseService.defaultDatabaseStatement("", false, "MySQL"));
+    }
+
+    @Test
     void reportsUnknownDriverClass() {
         DatabaseService service = new DatabaseService();
         ConnectionProfile bad = new ConnectionProfile(

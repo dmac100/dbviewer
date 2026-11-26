@@ -45,6 +45,7 @@ public final class DbViewer {
     private Composite statusBar;
 
     private MenuItem disconnectMenuItem;
+    private Menu tableContextMenu;
     private MenuItem closeTabMenuItem;
     private MenuItem runMenuItem;
     private MenuItem stopMenuItem;
@@ -56,9 +57,12 @@ public final class DbViewer {
     private volatile QueryCancel activeCancel;
 
     private Font monoFont;
+    private Font boldTreeFont;
     private TreeIcons treeIcons;
     private List<TableInfo> allTables = List.of();
     private List<TableInfo> visibleTables = List.of();
+    private String defaultDatabase;
+    private boolean defaultDatabaseIsSchema;
     /** Foreign-key choices made without a constraint, kept until the connection changes. */
     private final Map<String, ForeignKeyReference> rememberedForeignKeys = new HashMap<>();
     private String connectionText = "Not connected";
@@ -75,6 +79,9 @@ public final class DbViewer {
         fontData.setName("Monospace");
         fontData.setStyle(SWT.NORMAL);
         monoFont = new Font(display, fontData);
+        FontData boldFontData = display.getSystemFont().getFontData()[0];
+        boldFontData.setStyle(SWT.BOLD);
+        boldTreeFont = new Font(display, boldFontData);
         treeIcons = new TreeIcons(display);
 
         shell.addListener(SWT.Dispose, e -> {
@@ -85,6 +92,9 @@ public final class DbViewer {
             database.disconnect();
             if (monoFont != null && !monoFont.isDisposed()) {
                 monoFont.dispose();
+            }
+            if (boldTreeFont != null && !boldTreeFont.isDisposed()) {
+                boldTreeFont.dispose();
             }
             if (treeIcons != null) {
                 treeIcons.dispose();
@@ -210,6 +220,15 @@ public final class DbViewer {
             String tooltip = hovered == null ? null : (String) hovered.getData("tooltip");
             tableTree.setToolTipText(tooltip == null ? "" : tooltip);
         });
+        // SWT does not move the selection on right-click, so do it before the context menu opens.
+        tableTree.addListener(SWT.MouseDown, e -> {
+            if (e.button == 3) {
+                TreeItem clicked = tableTree.getItem(new Point(e.x, e.y));
+                if (clicked != null) {
+                    tableTree.setSelection(new TreeItem[] {clicked});
+                }
+            }
+        });
         tableTree.addListener(SWT.DefaultSelection, e -> {
             if (e.item instanceof TreeItem item && item.getItemCount() > 0) {
                 boolean expand = !item.getExpanded();
@@ -231,11 +250,66 @@ public final class DbViewer {
     }
 
     private void createTableContextMenu() {
-        Menu menu = new Menu(tableTree);
-        tableTree.setMenu(menu);
-        menuAction(menu, "Select All", 0, this::selectAll);
-        new MenuItem(menu, SWT.SEPARATOR);
-        menuAction(menu, "Refresh Tables", 0, this::refreshTables);
+        tableContextMenu = new Menu(tableTree);
+        tableTree.setMenu(tableContextMenu);
+        tableContextMenu.addListener(SWT.Show, e -> rebuildTableContextMenu());
+    }
+
+    /** Rebuilds the menu so "Use as default" only exists for a real catalog or schema group. */
+    private void rebuildTableContextMenu() {
+        for (MenuItem item : tableContextMenu.getItems()) {
+            item.dispose();
+        }
+        TreeItem group = selectedDatabaseGroup();
+        String scope = group == null ? null : (String) group.getData("databaseScope");
+        if (database.isConnected() && !queryRunning && scope != null && !scope.isBlank()) {
+            menuAction(tableContextMenu, "Use as default", 0, this::useSelectedDatabaseAsDefault);
+            new MenuItem(tableContextMenu, SWT.SEPARATOR);
+        }
+        menuAction(tableContextMenu, "Select All", 0, this::selectAll);
+        new MenuItem(tableContextMenu, SWT.SEPARATOR);
+        menuAction(tableContextMenu, "Refresh Tables", 0, this::refreshTables);
+    }
+
+    private TreeItem selectedDatabaseGroup() {
+        TreeItem[] selection = tableTree.getSelection();
+        if (selection.length != 1 || selection[0].getParentItem() != null) {
+            return null;
+        }
+        return selection[0];
+    }
+
+    /** Marks the selected database as bold and selects it for unqualified query table names. */
+    private void useSelectedDatabaseAsDefault() {
+        TreeItem group = selectedDatabaseGroup();
+        if (group == null || !database.isConnected()) {
+            return;
+        }
+        String scope = (String) group.getData("databaseScope");
+        if (scope == null || scope.isBlank()) {
+            return;
+        }
+        boolean schema = Boolean.TRUE.equals(group.getData("databaseIsSchema"));
+        try {
+            database.useDatabase(scope, schema);
+            defaultDatabase = scope;
+            defaultDatabaseIsSchema = schema;
+            applyDefaultDatabaseFont();
+            setStatus("Using " + scope + " as the default for queries.", false);
+        } catch (SQLException e) {
+            reportError("Could not select the default database", e);
+            setStatus("Could not select " + scope + ": " + messageOf(e), true);
+        }
+    }
+
+    private void applyDefaultDatabaseFont() {
+        for (TreeItem group : tableTree.getItems()) {
+            boolean isDefault = defaultDatabase != null
+                    && defaultDatabase.equalsIgnoreCase((String) group.getData("databaseScope"))
+                    && defaultDatabaseIsSchema == Boolean.TRUE.equals(
+                            group.getData("databaseIsSchema"));
+            group.setFont(isDefault ? boldTreeFont : null);
+        }
     }
 
     private void createQueryToolbar(Composite parent) {
@@ -341,6 +415,8 @@ public final class DbViewer {
         try {
             database.connect(profile);
             rememberedForeignKeys.clear();
+            defaultDatabase = null;
+            defaultDatabaseIsSchema = false;
             setStatus("Connected to " + profile.name() + ".", false);
             loadTables();
         } catch (SQLException e) {
@@ -353,6 +429,8 @@ public final class DbViewer {
     private void disconnect() {
         database.disconnect();
         rememberedForeignKeys.clear();
+        defaultDatabase = null;
+        defaultDatabaseIsSchema = false;
         allTables = List.of();
         populateTableList();
         for (QueryTab tab : tabs.allTabs()) {
@@ -400,10 +478,14 @@ public final class DbViewer {
 
         tableTree.removeAll();
         for (Map.Entry<String, List<TableInfo>> entry : grouped.entrySet()) {
+            TableInfo first = entry.getValue().get(0);
+            String scope = groupBySchema ? first.schema() : first.catalog();
             TreeItem groupItem = new TreeItem(tableTree, SWT.NONE);
             groupItem.setText(entry.getKey() + "  (" + entry.getValue().size() + ")");
             groupItem.setImage(treeIcons.forGroup());
             groupItem.setData("tooltip", groupBySchema ? "Schema" : "Database");
+            groupItem.setData("databaseScope", scope.isBlank() ? null : scope);
+            groupItem.setData("databaseIsSchema", groupBySchema);
             for (TableInfo table : entry.getValue()) {
                 TreeItem tableItem = new TreeItem(groupItem, SWT.NONE);
                 tableItem.setText(table.name());
@@ -417,6 +499,7 @@ public final class DbViewer {
             }
             groupItem.setExpanded(false);
         }
+        applyDefaultDatabaseFont();
     }
 
     /** Replaces the placeholder under a table item with its JDBC column metadata. */

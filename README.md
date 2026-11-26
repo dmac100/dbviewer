@@ -10,8 +10,9 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   database exposes), with a filter box. Groups start collapsed; double-click a group or table to
   expand or collapse it. Expanding a table loads its columns as child items. Databases/schemas,
   tables/views and columns are distinguished by icons; data types and primary-key details are
-  available in tooltips. The **Select All** context menu item builds and immediately runs a
-  `SELECT *` query for the chosen table(s).
+  available in tooltips. Right-click a database/schema group and choose **Use as default** to render
+  it bold and select it for unqualified query table names. The **Select All** context menu item
+  builds and immediately runs a `SELECT *` query for the chosen table(s).
 - **Main pane** — multiple query tabs (Ctrl+T to add, Ctrl+W to close), each with a monospace
   SQL editor featuring syntax highlighting and indentation-preserving Enter/Tab.
   Drag a tab by its tab strip: an insertion line shows where it will land, while dropping on
@@ -78,8 +79,9 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
      host key to `~/.ssh/known_hosts` first (for example, `ssh-keyscan host >> ~/.ssh/known_hosts`).
 3. Tables appear in the left pane, grouped by schema or catalog with every group initially
    collapsed. Double-click a group or table to expand/collapse it; expanding a table shows its
-   columns. Select one or more tables and use **Select All** from the context menu to run queries
-   showing all their rows.
+   columns. Right-click a group and choose **Use as default** to make it bold and run unqualified
+   queries against it. Select one or more tables and use **Select All** from the context menu to
+   run queries showing all their rows.
 4. Type or edit SQL in the active tab: **Ctrl+Enter** runs the statement at the cursor,
    **Ctrl+Shift+Enter** runs the whole script. Results appear below the editor in that tab.
    Use **Ctrl+T** for another query tab, drag tabs by their tab strips to reorder or split
