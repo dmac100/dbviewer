@@ -8,8 +8,9 @@ A small desktop database viewer built with **Java 21**, **SWT**, and **JDBC**.
   refresh tables, exit, about.
 - **Left pane** — lists tables and views in a tree grouped by catalog or schema (whichever the
   database exposes), with a filter box. Groups start collapsed; double-click a group or table to
-  expand or collapse it. Expanding a table loads its columns as child items, including data types
-  and primary-key markers. The **Select All** context menu item builds and immediately runs a
+  expand or collapse it. Expanding a table loads its columns as child items. Databases/schemas,
+  tables/views and columns are distinguished by icons; data types and primary-key details are
+  available in tooltips. The **Select All** context menu item builds and immediately runs a
   `SELECT *` query for the chosen table(s).
 - **Main pane** — multiple query tabs (Ctrl+T to add, Ctrl+W to close), each with a monospace
   SQL editor featuring syntax highlighting and indentation-preserving Enter/Tab.

@@ -11,6 +11,7 @@ import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.FontData;
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
@@ -53,6 +54,7 @@ public final class DbViewer {
     private volatile QueryCancel activeCancel;
 
     private Font monoFont;
+    private TreeIcons treeIcons;
     private List<TableInfo> allTables = List.of();
     private List<TableInfo> visibleTables = List.of();
     private String connectionText = "Not connected";
@@ -69,6 +71,7 @@ public final class DbViewer {
         fontData.setName("Monospace");
         fontData.setStyle(SWT.NORMAL);
         monoFont = new Font(display, fontData);
+        treeIcons = new TreeIcons(display);
 
         shell.addListener(SWT.Dispose, e -> {
             QueryCancel cancel = activeCancel;
@@ -78,6 +81,9 @@ public final class DbViewer {
             database.disconnect();
             if (monoFont != null && !monoFont.isDisposed()) {
                 monoFont.dispose();
+            }
+            if (treeIcons != null) {
+                treeIcons.dispose();
             }
         });
 
@@ -193,6 +199,13 @@ public final class DbViewer {
 
         tableTree = new Tree(pane, SWT.BORDER | SWT.MULTI | SWT.V_SCROLL | SWT.H_SCROLL);
         tableTree.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        // TreeItem has no tooltip API in this SWT version, so show the hovered item's info
+        // on the tree control itself.
+        tableTree.addListener(SWT.MouseMove, e -> {
+            TreeItem hovered = tableTree.getItem(new Point(e.x, e.y));
+            String tooltip = hovered == null ? null : (String) hovered.getData("tooltip");
+            tableTree.setToolTipText(tooltip == null ? "" : tooltip);
+        });
         tableTree.addListener(SWT.DefaultSelection, e -> {
             if (e.item instanceof TreeItem item && item.getItemCount() > 0) {
                 boolean expand = !item.getExpanded();
@@ -383,10 +396,15 @@ public final class DbViewer {
         for (Map.Entry<String, List<TableInfo>> entry : grouped.entrySet()) {
             TreeItem groupItem = new TreeItem(tableTree, SWT.NONE);
             groupItem.setText(entry.getKey() + "  (" + entry.getValue().size() + ")");
+            groupItem.setImage(treeIcons.forGroup());
+            groupItem.setData("tooltip", groupBySchema ? "Schema" : "Database");
             for (TableInfo table : entry.getValue()) {
                 TreeItem tableItem = new TreeItem(groupItem, SWT.NONE);
-                String suffix = table.type().isEmpty() ? "" : "  [" + table.type() + "]";
-                tableItem.setText(table.name() + suffix);
+                tableItem.setText(table.name());
+                tableItem.setImage(treeIcons.forTable(table));
+                if (!table.type().isBlank()) {
+                    tableItem.setData("tooltip", table.type());
+                }
                 tableItem.setData("table", table);
                 tableItem.setData("columnsLoaded", Boolean.FALSE);
                 new TreeItem(tableItem, SWT.NONE).setText("Loading columns...");
@@ -406,7 +424,18 @@ public final class DbViewer {
             }
             for (ColumnInfo column : columns) {
                 TreeItem columnItem = new TreeItem(item, SWT.NONE);
-                columnItem.setText(column.displayLabel());
+                columnItem.setText(column.name());
+                columnItem.setImage(treeIcons.forColumn(column));
+                StringBuilder tooltip = new StringBuilder(column.type());
+                if (column.primaryKey()) {
+                    if (tooltip.length() > 0) {
+                        tooltip.append(", ");
+                    }
+                    tooltip.append("primary key");
+                }
+                if (tooltip.length() > 0) {
+                    columnItem.setData("tooltip", tooltip.toString());
+                }
                 columnItem.setData("column", column);
                 columnItem.setData("table", table);
             }
