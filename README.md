@@ -91,7 +91,7 @@ macOS x86_64, and macOS aarch64. If you are on another architecture, change the
 
 - Results are capped at 10,000 rows to keep the UI responsive; the label says when a
   result was truncated. Cell values with line breaks are escaped, long values are shortened,
-  and binary values are shown as `[BINARY]`. CSV export and Ctrl+C copying use the underlying
+  and binary values are shown as grey `[BINARY]`. CSV export and Ctrl+C copying use the underlying
   values instead: full text and line breaks are preserved, and binary data is Base64-encoded.
 - **Delete Row(s)** asks for confirmation, then issues a `DELETE` for the selected rows. Tables
   with a primary key are matched by that key; otherwise all columns in the result are used. If a

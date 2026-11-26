@@ -418,7 +418,8 @@ final class QueryTab {
                 isNull = raw != null && i < raw.length && raw[i] == null;
             }
             rowItem.setText(i, text);
-            rowItem.setForeground(i, isNull ? nullForeground : foreground);
+            rowItem.setForeground(i,
+                    isNull || CellFormatter.BINARY_TEXT.equals(text) ? nullForeground : foreground);
             rowItem.setBackground(i, edited
                     ? owner.display().getSystemColor(SWT.COLOR_INFO_BACKGROUND) : background);
         }
