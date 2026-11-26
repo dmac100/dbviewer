@@ -64,6 +64,7 @@ public class ConnectionDialog extends Dialog {
         new Label(shell, SWT.NONE).setText("Database:");
         typeCombo = new Combo(shell, SWT.READ_ONLY);
         typeCombo.setItems(SQLITE, MYSQL, POSTGRES, GENERIC);
+        typeCombo.select(0);
         typeCombo.setLayoutData(fill());
 
         new Label(shell, SWT.NONE).setText("Connection name:");
@@ -72,7 +73,7 @@ public class ConnectionDialog extends Dialog {
 
         new Label(shell, SWT.NONE).setText("JDBC URL:");
         Composite urlRow = new Composite(shell, SWT.NONE);
-        urlRow.setLayout(new GridLayout(2, false));
+        urlRow.setLayout(rowLayout());
         urlRow.setLayoutData(fill());
         urlText = new Text(urlRow, SWT.BORDER);
         urlText.setLayoutData(fill());
@@ -162,7 +163,7 @@ public class ConnectionDialog extends Dialog {
         shell.setDefaultButton(okButton);
 
         typeCombo.addListener(SWT.Selection, e -> applyDefaults(typeCombo.getText()));
-        applyDefaults(SQLITE);
+        applyDefaults(typeCombo.getText());
 
         // Compute both states once, then start collapsed. Toggling recomputes the size in
         // refreshTunnelUi(), so the dialog really grows/shrinks without clipping its buttons.
@@ -344,7 +345,7 @@ public class ConnectionDialog extends Dialog {
     private Text labeledFileText(Composite parent, String label, String dialogTitle) {
         new Label(parent, SWT.NONE).setText(label);
         Composite row = new Composite(parent, SWT.NONE);
-        row.setLayout(new GridLayout(2, false));
+        row.setLayout(rowLayout());
         row.setLayoutData(fill());
         Text text = new Text(row, SWT.BORDER);
         text.setLayoutData(fill());
@@ -379,6 +380,14 @@ public class ConnectionDialog extends Dialog {
         box.setText("DB Viewer");
         box.setMessage(message);
         box.open();
+    }
+
+    /** A two-column row with no outer margins, so its fields line up with the dialog grid. */
+    private static GridLayout rowLayout() {
+        GridLayout layout = new GridLayout(2, false);
+        layout.marginWidth = 0;
+        layout.marginHeight = 0;
+        return layout;
     }
 
     private static GridData fill() {
