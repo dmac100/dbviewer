@@ -62,6 +62,7 @@ final class TabWorkspace implements TabDrag.Host {
         folder.addListener(SWT.Selection, e -> {
             if (!folder.isDisposed()) {
                 current = folder;
+                owner.updateConnectionUi();
             }
         });
         drag.attach(folder);

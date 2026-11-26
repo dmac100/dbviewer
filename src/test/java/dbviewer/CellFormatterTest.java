@@ -38,4 +38,18 @@ class CellFormatterTest {
         assertEquals(CellFormatter.MAX_CELL_LENGTH, result.length());
         assertTrue(result.endsWith("…"));
     }
+
+    @Test
+    void keepsFullUnescapedValuesForCsv() throws Exception {
+        String longText = "x".repeat(500);
+        assertEquals(longText, CellFormatter.rawText(longText));
+        assertEquals("first\nsecond\ttabbed\rreturn",
+                CellFormatter.rawText("first\nsecond\ttabbed\rreturn"));
+        assertEquals("123", CellFormatter.rawText(123));
+        assertEquals("", CellFormatter.rawText(null));
+
+        assertEquals("AQID", CellFormatter.rawText(new byte[] {1, 2, 3}));
+        assertEquals("AQ==", CellFormatter.rawText(ByteBuffer.wrap(new byte[] {1})));
+        assertEquals("AQI=", CellFormatter.rawText(new SerialBlob(new byte[] {1, 2})));
+    }
 }

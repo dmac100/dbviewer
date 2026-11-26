@@ -61,6 +61,50 @@ class DatabaseServiceTest {
     }
 
     @Test
+    void keepsRawValuesSeparateFromDisplayText() throws Exception {
+        Path db = tempDir.resolve("raw.db");
+        String longText = "x".repeat(500);
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+                Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE notes (note TEXT)");
+            s.execute("INSERT INTO notes VALUES ('first" + "\n" + "second')");
+            s.execute("INSERT INTO notes VALUES ('" + longText + "')");
+        }
+
+        DatabaseService service = new DatabaseService();
+        service.connect(profile(db));
+        QueryResult result = service.execute("SELECT note FROM notes");
+        assertEquals("first\nsecond", result.rawRows().get(0)[0]);
+        assertEquals(longText, result.rawRows().get(1)[0]);
+        assertTrue(((String) result.rows().get(1)[0]).endsWith("…"));
+        service.disconnect();
+    }
+
+    @Test
+    void cancelledQueryDoesNotRunAnyStatements() throws Exception {
+        Path db = tempDir.resolve("cancel.db");
+        try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);
+                Statement s = c.createStatement()) {
+            s.execute("CREATE TABLE people (name TEXT)");
+            s.execute("INSERT INTO people VALUES ('Ada')");
+        }
+
+        DatabaseService service = new DatabaseService();
+        service.connect(profile(db));
+
+        QueryCancel cancel = new QueryCancel();
+        cancel.cancel();
+        QueryResult result = service.execute(
+                "INSERT INTO people VALUES ('Ignored'); SELECT name FROM people", cancel);
+        assertTrue(result.columns().isEmpty());
+        assertEquals(0, result.totalUpdates());
+        QueryResult after = service.execute("SELECT name FROM people");
+        assertEquals(List.of("Ada"), after.rows().stream().map(row -> row[0]).toList());
+
+        service.disconnect();
+    }
+
+    @Test
     void deletesRowsInTheDatabaseUsingPrimaryKeys() throws Exception {
         Path db = tempDir.resolve("delete.db");
         try (Connection c = DriverManager.getConnection("jdbc:sqlite:" + db);

@@ -156,6 +156,14 @@ public final class DatabaseService {
 
     /** Executes a SQL script. If it produces result sets, the last one is returned. */
     public QueryResult execute(String script) throws SQLException {
+        return execute(script, null);
+    }
+
+    /**
+     * Executes a SQL script, stopping between statements/rows if {@code cancel} is requested.
+     * The token also receives the active {@link Statement} so it can interrupt a blocked call.
+     */
+    public QueryResult execute(String script, QueryCancel cancel) throws SQLException {
         requireConnection();
         long startedAt = System.nanoTime();
 
@@ -172,27 +180,42 @@ public final class DatabaseService {
         boolean truncated = false;
 
         for (String sql : statements) {
+            if (cancel != null && cancel.isCancelled()) {
+                break;
+            }
             try (Statement stmt = connection.createStatement()) {
-                boolean hasResultSet = stmt.execute(sql);
-                while (true) {
-                    if (hasResultSet) {
-                        try (ResultSet rs = stmt.getResultSet()) {
-                            QueryResult part = readResultSet(rs);
-                            // Last result set wins, as in most SQL clients.
-                            columns = part.columns();
-                            rows = part.rows();
-                            rawRows = part.rawRows();
-                            source = part.sourceTable();
-                            truncated = part.truncated();
-                        }
-                    } else {
-                        int count = stmt.getUpdateCount();
-                        if (count == -1) {
+                if (cancel != null) {
+                    cancel.watch(stmt);
+                }
+                try {
+                    boolean hasResultSet = stmt.execute(sql);
+                    while (true) {
+                        if (cancel != null && cancel.isCancelled()) {
                             break;
                         }
-                        updates.add(count);
+                        if (hasResultSet) {
+                            try (ResultSet rs = stmt.getResultSet()) {
+                                QueryResult part = readResultSet(rs, cancel);
+                                // Last result set wins, as in most SQL clients.
+                                columns = part.columns();
+                                rows = part.rows();
+                                rawRows = part.rawRows();
+                                source = part.sourceTable();
+                                truncated = part.truncated();
+                            }
+                        } else {
+                            int count = stmt.getUpdateCount();
+                            if (count == -1) {
+                                break;
+                            }
+                            updates.add(count);
+                        }
+                        hasResultSet = stmt.getMoreResults();
                     }
-                    hasResultSet = stmt.getMoreResults();
+                } finally {
+                    if (cancel != null) {
+                        cancel.unwatch(stmt);
+                    }
                 }
             }
         }
@@ -250,7 +273,7 @@ public final class DatabaseService {
         return deleted;
     }
 
-    private QueryResult readResultSet(ResultSet rs) throws SQLException {
+    private QueryResult readResultSet(ResultSet rs, QueryCancel cancel) throws SQLException {
         ResultSetMetaData meta = rs.getMetaData();
         int columnCount = meta.getColumnCount();
 
@@ -267,6 +290,9 @@ public final class DatabaseService {
         List<Object[]> rawRows = new ArrayList<>();
         boolean truncated = false;
         while (rs.next()) {
+            if (cancel != null && cancel.isCancelled()) {
+                break;
+            }
             if (rows.size() >= MAX_ROWS) {
                 truncated = true;
                 break;

@@ -2,6 +2,8 @@ package dbviewer;
 
 import java.nio.ByteBuffer;
 import java.sql.Blob;
+import java.sql.SQLException;
+import java.util.Base64;
 
 /** Turns arbitrary JDBC values into compact, single-line text suitable for a table cell. */
 public final class CellFormatter {
@@ -31,6 +33,40 @@ public final class CellFormatter {
             return text;
         }
         return text.substring(0, MAX_CELL_LENGTH - 1) + "…";
+    }
+
+    /**
+     * Returns the full text of a value for CSV output: no escaping, shortening or display
+     * markers. Binary data is Base64-encoded so the bytes are preserved.
+     */
+    public static String rawText(Object value) {
+        if (value == null) {
+            return "";
+        }
+        if (value instanceof byte[] bytes) {
+            return Base64.getEncoder().encodeToString(bytes);
+        }
+        if (value instanceof ByteBuffer buffer) {
+            ByteBuffer copy = buffer.duplicate();
+            byte[] bytes = new byte[copy.remaining()];
+            copy.get(bytes);
+            return Base64.getEncoder().encodeToString(bytes);
+        }
+        if (value instanceof Blob blob) {
+            try {
+                long length = blob.length();
+                if (length == 0) {
+                    return "";
+                }
+                if (length > Integer.MAX_VALUE) {
+                    return BINARY_TEXT;
+                }
+                return Base64.getEncoder().encodeToString(blob.getBytes(1, (int) length));
+            } catch (SQLException e) {
+                return BINARY_TEXT;
+            }
+        }
+        return value.toString();
     }
 
     private static boolean isBinary(Object value) {

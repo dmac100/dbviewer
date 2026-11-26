@@ -36,6 +36,7 @@ public final class DbViewer {
     private Tree tableTree;
     private Text tableFilter;
     private Button runButton;
+    private Button stopButton;
     private Label connectionLabel;
     private Label statusLabel;
     private Composite statusBar;
@@ -43,7 +44,13 @@ public final class DbViewer {
     private MenuItem disconnectMenuItem;
     private MenuItem closeTabMenuItem;
     private MenuItem runMenuItem;
+    private MenuItem stopMenuItem;
+    private MenuItem exportCsvMenuItem;
     private MenuItem refreshMenuItem;
+
+    /** Only one query runs at a time; both flags are accessed on the UI thread. */
+    private volatile boolean queryRunning;
+    private volatile QueryCancel activeCancel;
 
     private Font monoFont;
     private List<TableInfo> allTables = List.of();
@@ -128,6 +135,9 @@ public final class DbViewer {
         closeTabMenuItem = menuAction(queryMenu, "Close Tab\tCtrl+W", SWT.CONTROL | 'W', this::closeActiveTab);
         new MenuItem(queryMenu, SWT.SEPARATOR);
         runMenuItem = menuAction(queryMenu, "Run Query\tF5", SWT.F5, this::runQuery);
+        stopMenuItem = menuAction(queryMenu, "Stop Query", 0, this::stopQuery);
+        new MenuItem(queryMenu, SWT.SEPARATOR);
+        exportCsvMenuItem = menuAction(queryMenu, "Export Results as CSV...", 0, this::exportResultsCsv);
         refreshMenuItem = menuAction(queryMenu, "Refresh Tables\tCtrl+R", SWT.CONTROL | 'R', this::refreshTables);
         menuAction(queryMenu, "Clear Results", 0, this::clearResultsUi);
         menuAction(queryMenu, "Clear Editor", 0, this::clearEditor);
@@ -202,7 +212,7 @@ public final class DbViewer {
 
     private void createQueryToolbar(Composite parent) {
         Composite toolbar = new Composite(parent, SWT.NONE);
-        toolbar.setLayout(new GridLayout(4, false));
+        toolbar.setLayout(new GridLayout(5, false));
         toolbar.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
         Label header = new Label(toolbar, SWT.NONE);
@@ -218,6 +228,13 @@ public final class DbViewer {
         runButton.setText("Run Query  (Ctrl+Enter)");
         runButton.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, false, false));
         runButton.addListener(SWT.Selection, e -> runQuery());
+
+        stopButton = new Button(toolbar, SWT.PUSH);
+        stopButton.setText("Stop Query");
+        stopButton.setToolTipText("Stop the query that is currently running");
+        stopButton.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, false, false));
+        stopButton.setEnabled(false);
+        stopButton.addListener(SWT.Selection, e -> stopQuery());
 
         Button clearButton = new Button(toolbar, SWT.PUSH);
         clearButton.setText("Clear");
@@ -436,6 +453,47 @@ public final class DbViewer {
         }
     }
 
+    /** Interrupts the query currently running in any tab. */
+    private void stopQuery() {
+        QueryCancel cancel = activeCancel;
+        if (cancel == null) {
+            return;
+        }
+        cancel.cancel();
+        stopButton.setEnabled(false);
+        stopMenuItem.setEnabled(false);
+        setStatus("Stopping query...", false);
+    }
+
+    private void exportResultsCsv() {
+        QueryTab tab = activeTab();
+        if (tab != null) {
+            tab.exportCsv();
+        }
+    }
+
+    void beginQuery(QueryCancel cancel) {
+        queryRunning = true;
+        activeCancel = cancel;
+        if (!shell.isDisposed()) {
+            shell.setCursor(display.getSystemCursor(SWT.CURSOR_WAIT));
+        }
+        updateConnectionUi();
+    }
+
+    void endQuery() {
+        queryRunning = false;
+        activeCancel = null;
+        if (!shell.isDisposed()) {
+            shell.setCursor(null);
+            updateConnectionUi();
+        }
+    }
+
+    boolean isQueryRunning() {
+        return queryRunning;
+    }
+
     private void clearResultsUi() {
         QueryTab tab = activeTab();
         if (tab != null) {
@@ -457,10 +515,15 @@ public final class DbViewer {
                 : "Not connected";
         refreshStatusText();
 
-        boolean canRun = connected && activeTab() != null;
-        disconnectMenuItem.setEnabled(connected);
+        QueryTab tab = activeTab();
+        boolean hasTab = tab != null;
+        boolean canRun = connected && hasTab && !queryRunning;
+        disconnectMenuItem.setEnabled(connected && !queryRunning);
         runMenuItem.setEnabled(canRun);
-        refreshMenuItem.setEnabled(connected);
+        stopMenuItem.setEnabled(queryRunning);
+        stopButton.setEnabled(queryRunning);
+        exportCsvMenuItem.setEnabled(hasTab && tab.hasResults());
+        refreshMenuItem.setEnabled(connected && !queryRunning);
         runButton.setEnabled(canRun);
         closeTabMenuItem.setEnabled(tabs.tabCount() > 1);
     }
@@ -475,6 +538,8 @@ public final class DbViewer {
         showInfo("DB Viewer\n\nSWT + JDBC database viewer.\n"
                 + "Collapsed catalog/schema table tree, draggable/splittable query tabs, "
                 + "SQL highlighting, Ctrl+Enter for the current statement and result context menus.\n"
+                + "Queries can be stopped; results can be exported as CSV (Ctrl+C copies selected "
+                + "rows as CSV).\n"
                 + "Supports SQLite, MySQL, PostgreSQL and generic JDBC URLs.");
     }
 
@@ -509,7 +574,7 @@ public final class DbViewer {
         return box.open() == SWT.YES;
     }
 
-    void reportError(String title, SQLException e) {
+    void reportError(String title, Exception e) {
         e.printStackTrace();
         MessageBox box = new MessageBox(shell, SWT.ICON_ERROR | SWT.OK);
         box.setText(title);
@@ -517,7 +582,7 @@ public final class DbViewer {
         box.open();
     }
 
-    static String messageOf(SQLException e) {
+    static String messageOf(Exception e) {
         return e.getMessage() == null ? e.toString() : e.getMessage();
     }
 }

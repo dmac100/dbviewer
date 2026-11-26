@@ -1,5 +1,10 @@
 package dbviewer;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -18,6 +23,7 @@ import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.FileDialog;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
@@ -45,6 +51,7 @@ final class QueryTab {
     private MenuItem copyFieldItem;
     private MenuItem copyRowItem;
     private MenuItem copyAllItem;
+    private MenuItem exportCsvItem;
     private MenuItem deleteRowItem;
 
     private List<String> columns = List.of();
@@ -170,17 +177,54 @@ final class QueryTab {
             owner.setStatus("Enter a SQL query first.", true);
             return;
         }
+        if (owner.isQueryRunning()) {
+            owner.setStatus("A query is already running.", true);
+            return;
+        }
 
-        owner.shell().setCursor(owner.display().getSystemCursor(SWT.CURSOR_WAIT));
+        QueryCancel cancel = new QueryCancel();
+        owner.beginQuery(cancel);
+        owner.setStatus("Running query...", false);
+
+        Thread worker = new Thread(() -> runInBackground(sql, cancel), "dbviewer-query");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /** Runs the query away from the UI thread so it can be stopped while in progress. */
+    private void runInBackground(String sql, QueryCancel cancel) {
         try {
-            QueryResult result = owner.database().execute(sql);
-            showResult(result);
-            owner.setStatus("Query executed in " + result.elapsedMillis() + " ms.", false);
+            scheduleFinish(owner.database().execute(sql, cancel), null, cancel);
         } catch (SQLException e) {
-            owner.reportError("Query failed", e);
-            owner.setStatus("Query failed: " + DbViewer.messageOf(e), true);
+            scheduleFinish(null, e, cancel);
+        } catch (RuntimeException e) {
+            scheduleFinish(null, new SQLException("Unexpected error: " + e.getMessage(), e), cancel);
+        }
+    }
+
+    private void scheduleFinish(QueryResult result, SQLException failure, QueryCancel cancel) {
+        if (!owner.display().isDisposed()) {
+            owner.display().asyncExec(() -> finishQuery(result, failure, cancel));
+        }
+    }
+
+    /** Applies a finished query on the UI thread and then releases the running-query state. */
+    private void finishQuery(QueryResult result, SQLException failure, QueryCancel cancel) {
+        try {
+            if (resultTable.isDisposed()) {
+                return;
+            }
+            if (cancel.isCancelled()) {
+                owner.setStatus("Query stopped.", false);
+            } else if (failure != null) {
+                owner.reportError("Query failed", failure);
+                owner.setStatus("Query failed: " + DbViewer.messageOf(failure), true);
+            } else {
+                showResult(result);
+                owner.setStatus("Query executed in " + result.elapsedMillis() + " ms.", false);
+            }
         } finally {
-            owner.shell().setCursor(null);
+            owner.endQuery();
         }
     }
 
@@ -245,6 +289,12 @@ final class QueryTab {
         });
         // Remember which field was clicked so "Copy Field" can copy that cell.
         table.addListener(SWT.MouseDown, e -> selectedColumn = columnAt(e.x));
+        table.addListener(SWT.KeyDown, e -> {
+            if ((e.stateMask & SWT.MOD1) != 0 && (e.keyCode == 'c' || e.keyCode == 'C')) {
+                copySelectionAsCsv();
+                e.doit = false;
+            }
+        });
         return table;
     }
 
@@ -333,6 +383,7 @@ final class QueryTab {
         copyFieldItem = contextAction(menu, "Copy Field", this::copyField);
         copyRowItem = contextAction(menu, "Copy Row", () -> copyRows(false));
         copyAllItem = contextAction(menu, "Copy All Rows", () -> copyRows(true));
+        exportCsvItem = contextAction(menu, "Export Results as CSV...", this::exportCsv);
         new MenuItem(menu, SWT.SEPARATOR);
         deleteRowItem = contextAction(menu, "Delete Row(s)", this::deleteRows);
         menu.addListener(SWT.Show, e -> updateContextMenu());
@@ -350,6 +401,7 @@ final class QueryTab {
         copyFieldItem.setEnabled(selection.length > 0 && selectedColumn < columns.size());
         copyRowItem.setEnabled(selection.length > 0);
         copyAllItem.setEnabled(!rows.isEmpty());
+        exportCsvItem.setEnabled(hasResults());
         deleteRowItem.setEnabled(selection.length > 0);
     }
 
@@ -381,6 +433,81 @@ final class QueryTab {
         copyToClipboard(text.toString());
         owner.setStatus(selection.length + (selection.length == 1 ? " row" : " rows")
                 + " copied to clipboard.", false);
+    }
+
+    /** Ctrl+C on the results copies the selected rows as CSV records. */
+    private void copySelectionAsCsv() {
+        int[] selection = resultTable.getSelectionIndices();
+        if (selection.length == 0) {
+            owner.setStatus("Select rows in the results to copy as CSV.", true);
+            return;
+        }
+        StringBuilder csv = new StringBuilder();
+        for (int i = 0; i < selection.length; i++) {
+            if (i > 0) {
+                csv.append('\n');
+            }
+            csv.append(csvRow(selection[i]));
+        }
+        copyToClipboard(csv.toString());
+        owner.setStatus(selection.length + (selection.length == 1 ? " row" : " rows")
+                + " copied as CSV.", false);
+    }
+
+    /** CSV records use the underlying JDBC values, not the shortened display text. */
+    private String csvRow(int row) {
+        String[] fields = new String[columns.size()];
+        for (int column = 0; column < fields.length; column++) {
+            fields[column] = rawCell(row, column);
+        }
+        return Csv.line(fields);
+    }
+
+    private String rawCell(int row, int column) {
+        if (row < 0 || row >= rawRows.size() || column < 0
+                || column >= rawRows.get(row).length) {
+            return "";
+        }
+        return CellFormatter.rawText(rawRows.get(row)[column]);
+    }
+
+    boolean hasResults() {
+        return !columns.isEmpty();
+    }
+
+    /** Saves the displayed rows and column headers as a CSV file. */
+    void exportCsv() {
+        if (!hasResults()) {
+            owner.showInfo("There are no results to export.");
+            return;
+        }
+
+        FileDialog dialog = new FileDialog(owner.shell(), SWT.SAVE);
+        dialog.setText("Export Results as CSV");
+        dialog.setFilterNames(new String[] {"CSV files (*.csv)", "All files (*.*)"});
+        dialog.setFilterExtensions(new String[] {"*.csv", "*.*"});
+        dialog.setFileName(defaultExportName());
+        String path = dialog.open();
+        if (path == null || path.isBlank()) {
+            return;
+        }
+
+        try (BufferedWriter writer = Files.newBufferedWriter(
+                Path.of(path), StandardCharsets.UTF_8)) {
+            Csv.write(writer, columns, rows);
+        } catch (IOException | RuntimeException e) {
+            owner.reportError("Could not export results", e);
+            owner.setStatus("Could not export results: " + e.getMessage(), true);
+            return;
+        }
+        owner.setStatus("Exported " + rows.size() + (rows.size() == 1 ? " row" : " rows")
+                + " to " + path, false);
+    }
+
+    private String defaultExportName() {
+        QueryResult.SourceTable source = currentResult == null ? null : currentResult.sourceTable();
+        String name = source == null || source.table().isBlank() ? "results" : source.table();
+        return name + ".csv";
     }
 
     private int[] allRowIndices() {
@@ -489,6 +616,7 @@ final class QueryTab {
             }
             resultInfo.setText(info + "   •   " + elapsedMillis + " ms");
         }
+        owner.updateConnectionUi();
     }
 
     private void updateResultInfo() {
@@ -515,5 +643,6 @@ final class QueryTab {
         sortColumn = -1;
         sortAscending = true;
         resultInfo.setText("No results");
+        owner.updateConnectionUi();
     }
 }
